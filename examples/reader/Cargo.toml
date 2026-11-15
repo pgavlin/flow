@@ -1,0 +1,37 @@
+[package]
+name = "flow-demo-reader"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Desktop and browser reader example.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+flow_publication = { path = "../../crates/flow_publication", features = ["render", "epub"] }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+url = "2.5"
+web-time = "1"
+winit = "0.30.13"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = "0.17.2"
+webbrowser = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+wasm-bindgen = "=0.2.129"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "HtmlInputElement"] }
+
+[dev-dependencies]
+tempfile = "3"
+zip = { version = "7.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[profile.release]
+lto = "thin"

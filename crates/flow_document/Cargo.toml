@@ -1,0 +1,88 @@
+[package]
+name = "flow_document"
+version.workspace = true
+edition.workspace = true
+description = "Portable semantic document, reflow, pagination, and rendering engine"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["reading", "document", "epub", "typography"]
+categories = ["text-processing", "rendering"]
+
+[package.metadata.docs.rs]
+features = ["render"]
+
+[[example]]
+name = "render_document"
+required-features = ["render"]
+
+[features]
+default = []
+render = [
+    "dep:flow_cache",
+    "serde",
+    "dep:anyhow",
+    "dep:fontique",
+    "dep:harfrust",
+    "dep:hashbrown",
+    "dep:image",
+    "dep:lru",
+    "dep:memmap2",
+    "dep:serde_json",
+    "dep:skrifa",
+    "dep:swash",
+    "dep:unicode-normalization",
+    "dep:unicode-script",
+]
+serde = ["dep:serde"]
+telemetry = ["dep:tracing"]
+# Bundled font fixtures for testing hosts.
+test-fonts = ["render"]
+
+[lints]
+workspace = true
+
+[dependencies]
+flow_cache = { workspace = true, optional = true }
+blake3 = "1"
+cssparser = "0.38"
+hyphenation = { version = "0.8.4", features = ["embed_en-us"] }
+language-tags = "0.3.2"
+markdown = "=1.0.0-alpha.16"
+precomputed-hash = "0.1"
+quick-xml = "0.41"
+selectors = "0.42"
+text_layout = "0.4.1"
+thiserror = "2"
+unicode-bidi = "0.3.18"
+unicode-linebreak = "0.1.5"
+unicode-segmentation = "1.12"
+unicode-normalization = { version = "0.1", optional = true }
+url = "2.5"
+
+anyhow = { version = "1", optional = true }
+fontique = { version = "0.11.1", optional = true }
+harfrust = { version = "0.13.3", optional = true }
+hashbrown = { version = "0.16", optional = true }
+image = { version = "0.25", optional = true, default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+lru = { version = "0.16", optional = true }
+memmap2 = { version = "0.9", optional = true }
+serde = { version = "1", optional = true, features = ["derive", "rc"] }
+serde_json = { version = "1", optional = true }
+skrifa = { version = "0.44", optional = true }
+swash = { version = "0.2.10", optional = true }
+tracing = { version = "0.1.44", optional = true, default-features = false, features = ["std"] }
+tree-sitter = "=0.27.1"
+tree-sitter-highlight = "=0.27.1"
+unicode-script = { version = "0.5.8", optional = true }
+
+[dev-dependencies]
+png = "0.18"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tree-sitter-bash = "=0.25.1"
+tree-sitter-go = "=0.25.0"
+tree-sitter-javascript = "=0.25.0"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-sequel = "=0.3.11"
+tree-sitter-typescript = "=0.23.2"

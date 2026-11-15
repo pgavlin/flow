@@ -1,0 +1,16 @@
+<main id="manual" lang="en">
+  <h1>Build an imaginary signal box</h1>
+  <p><strong>Test document:</strong> this is not an electrical construction guide.</p>
+  <aside><p>The term <abbr>SB</abbr> means signal box here.</p></aside>
+  <h2>Vocabulary</h2><dl><dt>Signal</dt><dd><p>A fictional state change.</p></dd><dt>Indicator</dt><dd><p>A square drawn on paper.</p></dd></dl>
+  <h2>Procedure</h2><ol start="2"><li><p>Draw two squares.</p><ul><li><p>Label one <mark>ready</mark>.</p></li><li><p>Label one waiting.</p></li></ul></li><li><p>Record a transition using <code>state = ready</code>.</p></li></ol>
+  <pre><code class="language-rust">fn next(ready: bool) -&gt; bool {
+    !ready
+}</code></pre>
+  <pre><code class="language-mermaid">graph LR
+  Waiting --&gt; Ready</code></pre>
+  <figure><figcaption><p>The paper indicator.</p></figcaption><img src="images/signal.png" alt="Two adjacent squares labeled ready and waiting."/></figure>
+  <video title="Imaginary demonstration"><source src="media/signal.webm"/><p>Video fallback: <a href="transcript.xhtml">read the synthetic transcript</a>.</p></video>
+  <details open=""><summary>Check the record</summary><p>Both states should appear.</p></details>
+  <footer><p>Revision <time datetime="2030-04-05">five</time>.</p></footer>
+</main>

@@ -1,0 +1,91 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo lint --all
+
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - name: Build minimal workspace without warnings
+        run: cargo build --locked --workspace --no-default-features
+        env:
+          RUSTFLAGS: -D warnings
+      - run: cargo test --locked --workspace --no-default-features
+      - run: cargo test --locked --workspace --features render
+      - run: cargo test --locked -p flow_document --features render --example render_document
+      - run: cargo test --locked -p flow_document --no-default-features
+      - run: cargo test --locked -p flow_cache
+      - run: cargo package --locked -p flow_cache
+      - run: cargo test --locked -p flow_publication --no-default-features
+      - run: cargo check --locked --workspace --all-targets --all-features
+      - run: cargo test --locked --workspace --all-features
+      - name: Check shared cache dependency boundary
+        run: |
+          cargo tree --locked -p flow_cache --edges normal > /tmp/shared-cache-tree.txt
+          if grep -Eq ' (flow_document|flow_publication|fontique|harfrust|skrifa|swash|image|tracing) v' /tmp/shared-cache-tree.txt; then
+            echo "Shared cache transport unexpectedly depends on an engine layer"
+            exit 1
+          fi
+      - run: cargo doc --locked --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  reader:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/reader -> target
+      - run: cargo fmt --manifest-path examples/reader/Cargo.toml -- --check
+      - run: cargo test --locked --manifest-path examples/reader/Cargo.toml
+      - run: cargo clippy --locked --manifest-path examples/reader/Cargo.toml --all-targets
+
+  reader-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/reader -> target
+      - run: sudo apt-get update && sudo apt-get install -y clang llvm
+      - run: cargo install --locked wasm-bindgen-cli --version 0.2.129
+      - run: cargo build-web --dev
+        env:
+          CC_wasm32_unknown_unknown: clang
+          AR_wasm32_unknown_unknown: llvm-ar

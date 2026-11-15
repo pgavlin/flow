@@ -1,0 +1,43 @@
+[package]
+name = "flow_publication"
+version.workspace = true
+edition.workspace = true
+description = "Portable publication containers and reading sessions for flow_document"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["reading", "document", "epub", "typography"]
+categories = ["text-processing", "rendering"]
+
+[package.metadata.docs.rs]
+features = ["render", "epub", "serde"]
+
+[features]
+default = []
+epub = ["dep:quick-xml", "dep:url", "dep:zip"]
+render = ["flow_document/render", "dep:anyhow"]
+serde = ["flow_document/serde"]
+telemetry = ["flow_document/telemetry"]
+
+[lints]
+workspace = true
+
+[dependencies]
+flow_cache.workspace = true
+flow_document.workspace = true
+anyhow = { version = "1", optional = true }
+blake3 = "1"
+quick-xml = { version = "0.41", optional = true }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+url = { version = "2.5", optional = true }
+zip = { version = "7.3", optional = true, default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[[example]]
+name = "inspect_epub"
+required-features = ["epub"]
+
+[dev-dependencies]
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+flow_document = { workspace = true, features = ["render", "test-fonts"] }
