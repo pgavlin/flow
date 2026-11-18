@@ -104,15 +104,17 @@ pub fn import(source: &str, options: XhtmlOptions) -> Result<ImportOutcome, Xhtm
     let prepared = prepare(source.as_bytes(), &StrictFlowProfile)?;
     let content_root = prepared.tree.root();
     let author_styles = vec![AuthorStyle::default(); prepared.tree.nodes().len()];
-    Ok(lowering::lower_prepared(
+    lowering::lower_prepared(
         source,
         prepared,
         &author_styles,
-        options.resource_base,
-        options.identity,
-        options.retention,
+        lowering::LoweringOptions {
+            resource_base: options.resource_base,
+            identity: options.identity,
+            retention: options.retention,
+        },
         content_root,
         &StrictFlowProfile,
     )
-    .map_err(XhtmlImportError::from_lowering)?)
+    .map_err(XhtmlImportError::from_lowering)
 }

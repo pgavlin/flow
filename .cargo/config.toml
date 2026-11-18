@@ -1,3 +1,4 @@
 [alias]
+perf = "run --quiet --locked --manifest-path tools/xtask/Cargo.toml -- perf"
 build-web = "run --quiet --locked --manifest-path tools/xtask/Cargo.toml -- build-web"
 lint = "run --quiet --locked --manifest-path tools/xtask/Cargo.toml -- lint"

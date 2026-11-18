@@ -6,12 +6,15 @@ use crate::{
     syntax::{SyntaxKind, highlight_code},
 };
 use hyphenation::{Hyphenator as _, Language, Load, Standard};
-use std::sync::OnceLock;
+use std::{borrow::Cow, sync::OnceLock};
 use text_layout::{FirstFit, Item, KnuthPlass, LineWidths, ParagraphLayout, UniformLineWidth};
 use unicode_segmentation::UnicodeSegmentation;
 
 mod flow;
+mod items;
 mod table;
+
+use items::{AtomId, LinkId, ParagraphItems, StyleId};
 
 #[cfg(feature = "render")]
 pub(crate) use flow::compose_flow_document;
@@ -751,13 +754,22 @@ impl ContinuousLayout {
 }
 
 #[derive(Clone, Debug)]
-struct Atom {
-    text: String,
+struct Atom<'text> {
+    text: Cow<'text, str>,
     range: TextRange,
-    style: TextStyle,
-    flow_link: Option<crate::model::flow::Destination>,
+    style: StyleId,
+    flow_link: Option<LinkId>,
     metrics: TextMetrics,
     atomic: bool,
+}
+
+impl<'text> Atom<'text> {
+    fn text_slice(&self, range: std::ops::Range<usize>) -> Cow<'text, str> {
+        match &self.text {
+            Cow::Borrowed(text) => Cow::Borrowed(&text[range]),
+            Cow::Owned(text) => Cow::Owned(text[range].to_owned()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -765,16 +777,15 @@ struct Space {
     range: TextRange,
 }
 
-#[derive(Clone, Debug)]
-#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Copy, Debug)]
 enum Break {
     Line,
     Emergency,
-    Hyphen(Atom),
+    Hyphen(AtomId),
     Paragraph,
 }
 
-type LayoutItem = Item<Atom, Space, Break>;
+type LayoutItem = Item<AtomId, Space, Break>;
 
 #[derive(Clone, Copy)]
 enum WordBreaking {
@@ -785,15 +796,16 @@ enum WordBreaking {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn push_text_items<M: TextMeasurer>(
-    items: &mut Vec<LayoutItem>,
-    text: &str,
+fn push_text_items<'text, M: TextMeasurer>(
+    items: &mut ParagraphItems<'text>,
+    text: &'text str,
     range: TextRange,
     style: TextStyle,
     measurer: &M,
     word_breaking: WordBreaking,
     options: &LayoutOptions,
 ) {
+    let style = items.push_style(style);
     if let WordBreaking::InlineCode(width) = word_breaking {
         push_inline_code_items(items, text, range, style, measurer, width, options);
         return;
@@ -807,14 +819,14 @@ fn push_text_items<M: TextMeasurer>(
         if segment.contains('\n') {
             for (index, part) in segment.split('\n').enumerate() {
                 if !part.is_empty() {
-                    push_word(items, part, source, style.clone(), measurer);
+                    push_word(items, part, source, style, measurer);
                 }
                 if index + 1 < segment.split('\n').count() {
                     terminate(items, Break::Line);
                 }
             }
         } else if segment.chars().all(char::is_whitespace) {
-            let metrics = measurer.measure(" ", &style);
+            let metrics = measurer.measure(" ", items.style(style));
             items.push(Item::Glue {
                 width: metrics.width,
                 stretch: metrics.width * options.space_stretch,
@@ -825,19 +837,19 @@ fn push_text_items<M: TextMeasurer>(
             word_breaking,
             WordBreaking::Hyphenate | WordBreaking::Emergency(_)
         ) && options.hyphenation
-            && style.family == FontFamily::Proportional
+            && items.style(style).family == FontFamily::Proportional
             && segment.chars().all(char::is_alphabetic)
             && push_hyphenated_word(
                 items,
                 segment,
                 source,
-                style.clone(),
+                style,
                 measurer,
                 options.hyphen_penalty,
             )
         {
         } else if matches!(word_breaking, WordBreaking::Emergency(width) if
-            measurer.measure(segment, &style).width > width && segment.graphemes(true).count() > 1
+            measurer.measure(segment, items.style(style)).width > width && segment.graphemes(true).count() > 1
         ) {
             let graphemes: Vec<_> = segment.grapheme_indices(true).collect();
             for (index, (grapheme_offset, grapheme)) in graphemes.iter().enumerate() {
@@ -848,7 +860,7 @@ fn push_text_items<M: TextMeasurer>(
                         .saturating_add(*grapheme_offset + grapheme.len())
                         .min(source.end),
                 };
-                push_word(items, grapheme, grapheme_source, style.clone(), measurer);
+                push_word(items, grapheme, grapheme_source, style, measurer);
                 if index + 1 < graphemes.len() {
                     items.push(Item::Penalty {
                         width: 0.0,
@@ -859,17 +871,17 @@ fn push_text_items<M: TextMeasurer>(
                 }
             }
         } else {
-            push_word(items, segment, source, style.clone(), measurer);
+            push_word(items, segment, source, style, measurer);
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn push_inline_code_items<M: TextMeasurer>(
-    items: &mut Vec<LayoutItem>,
-    text: &str,
+fn push_inline_code_items<'text, M: TextMeasurer>(
+    items: &mut ParagraphItems<'text>,
+    text: &'text str,
     range: TextRange,
-    style: TextStyle,
+    style: StyleId,
     measurer: &M,
     width: f32,
     options: &LayoutOptions,
@@ -899,14 +911,7 @@ fn push_inline_code_items<M: TextMeasurer>(
                             .saturating_add(part_offset + part.len())
                             .min(source.end),
                     };
-                    push_emergency_code_piece(
-                        items,
-                        part,
-                        part_range,
-                        style.clone(),
-                        measurer,
-                        width,
-                    );
+                    push_emergency_code_piece(items, part, part_range, style, measurer, width);
                 }
                 part_offset += part.len();
                 if index + 1 < segment.split('\n').count() {
@@ -915,7 +920,7 @@ fn push_inline_code_items<M: TextMeasurer>(
                 }
             }
         } else if segment.chars().all(char::is_whitespace) {
-            let metrics = measurer.measure(" ", &style);
+            let metrics = measurer.measure(" ", items.style(style));
             items.push(Item::Glue {
                 width: metrics.width,
                 stretch: metrics.width * options.space_stretch,
@@ -944,7 +949,7 @@ fn push_inline_code_items<M: TextMeasurer>(
                             start: source.start.saturating_add(local_start),
                             end: source.start.saturating_add(local_end).min(source.end),
                         },
-                        style.clone(),
+                        style,
                         measurer,
                         width,
                     );
@@ -963,15 +968,17 @@ fn push_inline_code_items<M: TextMeasurer>(
     }
 }
 
-fn push_emergency_code_piece<M: TextMeasurer>(
-    items: &mut Vec<LayoutItem>,
-    text: &str,
+fn push_emergency_code_piece<'text, M: TextMeasurer>(
+    items: &mut ParagraphItems<'text>,
+    text: &'text str,
     range: TextRange,
-    style: TextStyle,
+    style: StyleId,
     measurer: &M,
     width: f32,
 ) {
-    if measurer.measure(text, &style).width <= width || text.graphemes(true).count() <= 1 {
+    if measurer.measure(text, items.style(style)).width <= width
+        || text.graphemes(true).count() <= 1
+    {
         push_word(items, text, range, style, measurer);
         return;
     }
@@ -988,7 +995,7 @@ fn push_emergency_code_piece<M: TextMeasurer>(
                     .saturating_add(*offset + grapheme.len())
                     .min(range.end),
             },
-            style.clone(),
+            style,
             measurer,
         );
         if index + 1 < graphemes.len() {
@@ -1002,11 +1009,11 @@ fn push_emergency_code_piece<M: TextMeasurer>(
     }
 }
 
-fn push_hyphenated_word<M: TextMeasurer>(
-    items: &mut Vec<LayoutItem>,
-    text: &str,
+fn push_hyphenated_word<'text, M: TextMeasurer>(
+    items: &mut ParagraphItems<'text>,
+    text: &'text str,
     range: TextRange,
-    style: TextStyle,
+    style: StyleId,
     measurer: &M,
     penalty: f32,
 ) -> bool {
@@ -1035,7 +1042,7 @@ fn push_hyphenated_word<M: TextMeasurer>(
             items,
             &text[part_start..part_end],
             part_source,
-            style.clone(),
+            style,
             measurer,
         );
         if part_end < text.len() {
@@ -1043,14 +1050,16 @@ fn push_hyphenated_word<M: TextMeasurer>(
             // Use the ordinary hyphen glyph to avoid an unnecessary fallback
             // face when the primary font does not contain U+2010.
             let atom = make_atom(
+                items,
                 "-",
                 TextRange {
                     start: boundary,
                     end: boundary,
                 },
-                style.clone(),
+                style,
                 measurer,
             );
+            let atom = items.push_atom(atom);
             items.push(Item::Penalty {
                 // A selected discretionary hyphen hangs outside the measure.
                 // Keep its real glyph advance in the atom for paint/hit testing,
@@ -1066,17 +1075,20 @@ fn push_hyphenated_word<M: TextMeasurer>(
     true
 }
 
-fn make_atom<M: TextMeasurer>(
-    text: &str,
+fn make_atom<'text, M: TextMeasurer>(
+    items: &ParagraphItems<'text>,
+    text: impl Into<Cow<'text, str>>,
     range: TextRange,
-    style: TextStyle,
+    style: StyleId,
     measurer: &M,
-) -> Atom {
-    let mut metrics = measurer.measure(text, &style);
-    metrics.ascent += style.baseline_shift;
-    metrics.descent = (metrics.descent - style.baseline_shift).max(0.0);
+) -> Atom<'text> {
+    let text = text.into();
+    let resolved = items.style(style);
+    let mut metrics = measurer.measure(&text, resolved);
+    metrics.ascent += resolved.baseline_shift;
+    metrics.descent = (metrics.descent - resolved.baseline_shift).max(0.0);
     Atom {
-        text: text.to_owned(),
+        text,
         range,
         style,
         flow_link: None,
@@ -1085,55 +1097,64 @@ fn make_atom<M: TextMeasurer>(
     }
 }
 
-fn set_flow_link(items: &mut [LayoutItem], destination: Option<&crate::model::flow::Destination>) {
+fn set_flow_link(
+    items: &mut ParagraphItems,
+    start: usize,
+    destination: Option<&crate::model::flow::Destination>,
+) {
     let Some(destination) = destination else {
         return;
     };
-    for item in items {
-        match item {
-            Item::Box { data, .. } => data.flow_link = Some(destination.clone()),
+    let link = items.push_link(destination.clone());
+    for index in start..items.len() {
+        let atom = match items[index] {
+            Item::Box { data, .. } => Some(data),
             Item::Penalty {
                 data: Break::Hyphen(atom),
                 ..
-            } => atom.flow_link = Some(destination.clone()),
-            Item::Glue { .. } | Item::Penalty { .. } => {}
+            } => Some(atom),
+            Item::Glue { .. } | Item::Penalty { .. } => None,
+        };
+        if let Some(atom) = atom {
+            items.atom_mut(atom).flow_link = Some(link);
         }
     }
 }
 
 fn push_atomic_item(
-    items: &mut Vec<LayoutItem>,
+    items: &mut ParagraphItems,
     range: TextRange,
     style: TextStyle,
     width: f32,
     height: f32,
 ) {
-    items.push(Item::Box {
-        width,
-        data: Atom {
-            text: String::new(),
-            range,
-            style,
-            flow_link: None,
-            metrics: TextMetrics {
-                width,
-                ascent: height,
-                descent: 0.0,
-            },
-            atomic: true,
+    let style = items.push_style(style);
+    items.push_box(Atom {
+        text: Cow::Borrowed(""),
+        range,
+        style,
+        flow_link: None,
+        metrics: TextMetrics {
+            width,
+            ascent: height,
+            descent: 0.0,
         },
+        atomic: true,
     });
 }
 
 fn push_break_opportunity<M: TextMeasurer>(
-    items: &mut Vec<LayoutItem>,
+    items: &mut ParagraphItems,
     range: TextRange,
     hyphen_when_broken: bool,
     style: TextStyle,
     measurer: &M,
 ) {
     let (data, flagged) = if hyphen_when_broken {
-        (Break::Hyphen(make_atom("-", range, style, measurer)), true)
+        let style = items.push_style(style);
+        let atom = make_atom(items, "-", range, style, measurer);
+        let atom = items.push_atom(atom);
+        (Break::Hyphen(atom), true)
     } else {
         (Break::Emergency, false)
     };
@@ -1145,21 +1166,21 @@ fn push_break_opportunity<M: TextMeasurer>(
     });
 }
 
-fn push_word<M: TextMeasurer>(
-    items: &mut Vec<LayoutItem>,
-    text: &str,
+fn push_word<'text, M: TextMeasurer>(
+    items: &mut ParagraphItems<'text>,
+    text: &'text str,
     range: TextRange,
-    style: TextStyle,
+    style: StyleId,
     measurer: &M,
 ) {
     if matches!(
-        style.bidi.mode,
+        items.style(style).bidi.mode,
         BidiMode::Override | BidiMode::IsolateOverride
     ) {
         push_directional_word(items, text, range, style, measurer);
         return;
     }
-    let base_level = match style.bidi.direction {
+    let base_level = match items.style(style).bidi.direction {
         BaseDirection::LeftToRight => Some(unicode_bidi::Level::ltr()),
         BaseDirection::RightToLeft => Some(unicode_bidi::Level::rtl()),
         BaseDirection::Auto => None,
@@ -1172,12 +1193,12 @@ fn push_word<M: TextMeasurer>(
         while end < text.len() && bidi.levels[end].is_rtl() == rtl {
             end += text[end..].chars().next().unwrap().len_utf8();
         }
-        let mut segment_style = style.clone();
-        segment_style.shape_direction = if rtl {
+        let direction = if rtl {
             BaseDirection::RightToLeft
         } else {
             BaseDirection::LeftToRight
         };
+        let segment_style = items.directional_style(style, direction);
         push_directional_word(
             items,
             &text[start..end],
@@ -1192,18 +1213,15 @@ fn push_word<M: TextMeasurer>(
     }
 }
 
-fn push_directional_word<M: TextMeasurer>(
-    items: &mut Vec<LayoutItem>,
-    text: &str,
+fn push_directional_word<'text, M: TextMeasurer>(
+    items: &mut ParagraphItems<'text>,
+    text: &'text str,
     range: TextRange,
-    style: TextStyle,
+    style: StyleId,
     measurer: &M,
 ) {
-    let atom = make_atom(text, range, style, measurer);
-    items.push(Item::Box {
-        width: atom.metrics.width,
-        data: atom,
-    });
+    let atom = make_atom(items, text, range, style, measurer);
+    items.push_box(atom);
 }
 
 fn terminate(items: &mut Vec<LayoutItem>, kind: Break) {
@@ -1256,7 +1274,7 @@ where
 }
 
 fn materialize_lines(
-    items: Vec<LayoutItem>,
+    items: &ParagraphItems,
     breaks: Vec<text_layout::Line>,
     left: f32,
     top: f32,
@@ -1284,7 +1302,7 @@ fn materialize_lines(
             Some(Item::Penalty {
                 data: Break::Hyphen(atom),
                 ..
-            }) => Some(atom),
+            }) => Some(items.atom(*atom)),
             _ => None,
         };
         let content = &line_items[..line_items.len().saturating_sub(1)];
@@ -1293,9 +1311,10 @@ fn materialize_lines(
         let mut em_size = 0.0_f32;
         for item in content {
             if let Item::Box { data, .. } = item {
+                let data = items.atom(*data);
                 ascent = ascent.max(data.metrics.ascent);
                 descent = descent.max(data.metrics.descent);
-                em_size = em_size.max(data.style.size);
+                em_size = em_size.max(items.style(data.style).size);
             }
         }
         if ascent == 0.0 && descent == 0.0 {
@@ -1322,14 +1341,16 @@ fn materialize_lines(
         for item in content {
             match item {
                 Item::Box { width, data } => {
+                    let data = items.atom(*data);
                     source.start = source.start.min(data.range.start);
                     source.end = source.end.max(data.range.end);
                     if let Some(previous) = runs.last_mut().filter(|previous| {
                         !data.atomic
                             && !previous.text.is_empty()
                             && previous.range.end == data.range.start
-                            && previous.style == data.style
-                            && previous.flow_link == data.flow_link
+                            && previous.style == *items.style(data.style)
+                            && previous.flow_link.as_ref()
+                                == data.flow_link.map(|link| items.link(link))
                             && (previous.x + previous.width - x).abs() < 0.001
                     }) {
                         previous.text.push_str(&data.text);
@@ -1337,11 +1358,11 @@ fn materialize_lines(
                         previous.width += *width;
                     } else {
                         runs.push(RunLayout {
-                            text: data.text.clone(),
+                            text: data.text.as_ref().to_owned(),
                             range: data.range,
-                            style: data.style.clone(),
+                            style: items.style(data.style).clone(),
                             syntax: SyntaxKind::Plain,
-                            flow_link: data.flow_link.clone(),
+                            flow_link: data.flow_link.map(|link| items.link(link).clone()),
                             generated_action: None,
                             x,
                             width: *width,
@@ -1388,11 +1409,11 @@ fn materialize_lines(
             source.start = source.start.min(atom.range.start);
             source.end = source.end.max(atom.range.end);
             runs.push(RunLayout {
-                text: atom.text.clone(),
+                text: atom.text.as_ref().to_owned(),
                 range: atom.range,
-                style: atom.style.clone(),
+                style: items.style(atom.style).clone(),
                 syntax: SyntaxKind::Plain,
-                flow_link: atom.flow_link.clone(),
+                flow_link: atom.flow_link.map(|link| items.link(link).clone()),
                 generated_action: None,
                 x,
                 width: atom.metrics.width,

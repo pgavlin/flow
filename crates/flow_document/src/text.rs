@@ -3,15 +3,16 @@ use fontique::{
     Attributes, Blob, Collection, CollectionOptions, FamilyId, FontStyle,
     FontWeight as MatchWeight, GenericFamily, QueryFamily, QueryStatus, SourceCache,
 };
-use harfrust::{Direction, FontRef as HarfFontRef, ShapeOptions, ShaperData, UnicodeBuffer};
-use hashbrown::{Equivalent, HashMap};
-use lru::LruCache;
-use skrifa::{FontRef as SkrifaFontRef, MetadataProvider, instance::Size};
-use std::{
-    hash::{Hash, Hasher},
-    mem::size_of,
-    sync::Arc,
+use harfrust::{
+    Direction, FontRef as HarfFontRef, ShapeOptions, ShapePlan, ShapePlanKey, ShaperData,
+    UnicodeBuffer,
 };
+use lru::LruCache;
+use std::collections::HashMap;
+mod cache;
+use cache::{CacheBudget, TextCache};
+use skrifa::{FontRef as SkrifaFontRef, MetadataProvider, instance::Size};
+use std::{mem::size_of, sync::Arc};
 use swash::{
     FontRef as SwashFontRef,
     scale::{
@@ -68,13 +69,13 @@ impl<K: Eq, V> SmallLru<K, V> {
     fn new(capacity: usize) -> Self {
         assert!(capacity > 0);
         Self {
-            entries: Vec::with_capacity(capacity),
+            entries: Vec::new(),
             epoch: 0,
             capacity,
         }
     }
 
-    fn get_or_insert_with(&mut self, key: K, make_value: impl FnOnce() -> V) -> &V {
+    fn get_or_insert_with(&mut self, key: K, make_value: impl FnOnce() -> V) -> &mut V {
         self.epoch = self.epoch.wrapping_add(1);
         let index = if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
             index
@@ -102,7 +103,7 @@ impl<K: Eq, V> SmallLru<K, V> {
             index
         };
         self.entries[index].epoch = self.epoch;
-        &self.entries[index].value
+        &mut self.entries[index].value
     }
 }
 
@@ -174,38 +175,62 @@ impl GlyphImageCache {
         }
     }
 
-    fn get_or_insert_with(
-        &mut self,
-        key: GlyphImageKey,
-        render: impl FnOnce() -> Option<Image>,
-    ) -> &Option<Image> {
-        if self.entries.contains(&key) {
-            return self
-                .entries
-                .get(&key)
-                .expect("a contained glyph is present");
+    fn evict(&mut self, budget: &mut CacheBudget) -> bool {
+        if let Some((_, image)) = self.entries.pop_lru() {
+            let bytes = glyph_image_bytes(&image);
+            self.bytes -= bytes;
+            budget.release(bytes);
+            budget.evictions += 1;
+            true
+        } else {
+            false
         }
+    }
 
-        let image = render();
-        self.bytes += glyph_image_bytes(&image);
-        self.entries.put(key, image);
-        while self.bytes > self.budget && self.entries.len() > 1 {
-            let (_, evicted) = self
-                .entries
-                .pop_lru()
-                .expect("a nonempty glyph cache has an LRU entry");
-            self.bytes = self.bytes.saturating_sub(glyph_image_bytes(&evicted));
+    fn get_or_insert_with<'a>(
+        &'a mut self,
+        key: GlyphImageKey,
+        budget: &mut CacheBudget,
+        render: impl FnOnce() -> Option<Image>,
+    ) -> GlyphImage<'a> {
+        if self.entries.contains(&key) {
+            return GlyphImage::Cached(self.entries.get(&key).expect("cached glyph"));
         }
-        self.entries
-            .get(&key)
-            .expect("the most recent glyph remains cached")
+        let image = render();
+        let bytes = glyph_image_bytes(&image);
+        if bytes > self.budget || bytes > budget.limit {
+            return GlyphImage::Uncached(image);
+        }
+        while self.bytes + bytes > self.budget || bytes > budget.limit.saturating_sub(budget.used) {
+            if !self.evict(budget) {
+                return GlyphImage::Uncached(image);
+            }
+        }
+        assert!(budget.reserve(bytes));
+        self.bytes += bytes;
+        self.entries.put(key, image);
+        GlyphImage::Cached(self.entries.get(&key).expect("inserted glyph"))
+    }
+}
+
+enum GlyphImage<'a> {
+    Cached(&'a Option<Image>),
+    Uncached(Option<Image>),
+}
+impl std::ops::Deref for GlyphImage<'_> {
+    type Target = Option<Image>;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Cached(image) => image,
+            Self::Uncached(image) => image,
+        }
     }
 }
 
 fn glyph_image_bytes(image: &Option<Image>) -> usize {
     size_of::<GlyphImageKey>()
         + size_of::<Option<Image>>()
-        + image.as_ref().map_or(0, |image| image.data.len())
+        + image.as_ref().map_or(0, |image| image.data.capacity())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -239,159 +264,45 @@ struct ShapedText {
     clusters: Vec<ShapedCluster>,
 }
 
-const SHAPED_TEXT_CACHE_BUDGET: usize = 32 * 1024 * 1024;
-
-#[derive(Eq, Hash, PartialEq)]
-struct ShapedTextKey {
-    text: Box<str>,
-    family: FontFamily,
-    size: u32,
-    weight: FontWeight,
-    italic: bool,
-    letter_spacing: u32,
-    bidi: crate::model::flow::BidiState,
-    shape_direction: crate::model::flow::BaseDirection,
-    scale: u32,
+/// Diagnostic counters; never part of persistent artifact identity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FontSystemStats {
+    pub registrations: u64,
+    pub metric_hits: u64,
+    pub metric_misses: u64,
+    pub shaped_hits: u64,
+    pub shaped_misses: u64,
+    pub shaper_data_builds: u64,
+    pub plan_hits: u64,
+    pub plan_builds: u64,
+    pub evictions: u64,
 }
-
-struct ShapedTextLookup<'a> {
-    text: &'a str,
-    style: &'a TextStyle,
-    scale: u32,
-}
-
-impl Hash for ShapedTextLookup<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.text.hash(state);
-        self.style.family.hash(state);
-        self.style.size.to_bits().hash(state);
-        self.style.weight.hash(state);
-        self.style.italic.hash(state);
-        self.style.letter_spacing.to_bits().hash(state);
-        self.style.bidi.hash(state);
-        self.style.shape_direction.hash(state);
-        self.scale.hash(state);
+impl std::ops::AddAssign for FontSystemStats {
+    fn add_assign(&mut self, other: Self) {
+        self.registrations += other.registrations;
+        self.metric_hits += other.metric_hits;
+        self.metric_misses += other.metric_misses;
+        self.shaped_hits += other.shaped_hits;
+        self.shaped_misses += other.shaped_misses;
+        self.shaper_data_builds += other.shaper_data_builds;
+        self.plan_hits += other.plan_hits;
+        self.plan_builds += other.plan_builds;
+        self.evictions += other.evictions;
     }
 }
-
-impl Equivalent<ShapedTextKey> for ShapedTextLookup<'_> {
-    fn equivalent(&self, key: &ShapedTextKey) -> bool {
-        self.text == key.text.as_ref()
-            && self.style.family == key.family
-            && self.style.size.to_bits() == key.size
-            && self.style.weight == key.weight
-            && self.style.italic == key.italic
-            && self.style.letter_spacing.to_bits() == key.letter_spacing
-            && self.style.bidi == key.bidi
-            && self.style.shape_direction == key.shape_direction
-            && self.scale == key.scale
-    }
+struct FaceShaper {
+    data: ShaperData,
+    plans: Vec<ShapePlan>,
 }
-
-struct CachedShapedText {
-    shaped: Arc<ShapedText>,
-    bytes: usize,
-    last_used: u64,
-}
-
-struct ShapedTextCache {
-    entries: HashMap<ShapedTextKey, CachedShapedText>,
-    bytes: usize,
-    budget: usize,
-    clock: u64,
-}
-
-impl ShapedTextCache {
-    fn new(budget: usize) -> Self {
-        Self {
-            entries: HashMap::new(),
-            bytes: 0,
-            budget,
-            clock: 0,
-        }
-    }
-
-    fn get(&mut self, text: &str, style: &TextStyle, scale: f32) -> Option<Arc<ShapedText>> {
-        self.clock = self.clock.wrapping_add(1);
-        let cached = self.entries.get_mut(&ShapedTextLookup {
-            text,
-            style,
-            scale: scale.to_bits(),
-        })?;
-        cached.last_used = self.clock;
-        Some(Arc::clone(&cached.shaped))
-    }
-
-    fn insert(&mut self, text: &str, style: &TextStyle, scale: f32, shaped: Arc<ShapedText>) {
-        self.clock = self.clock.wrapping_add(1);
-        let bytes = shaped_text_bytes(text, &shaped);
-        self.bytes += bytes;
-        self.entries.insert(
-            ShapedTextKey {
-                text: text.into(),
-                family: style.family.clone(),
-                size: style.size.to_bits(),
-                weight: style.weight,
-                italic: style.italic,
-                letter_spacing: style.letter_spacing.to_bits(),
-                bidi: style.bidi,
-                shape_direction: style.shape_direction,
-                scale: scale.to_bits(),
-            },
-            CachedShapedText {
-                shaped,
-                bytes,
-                last_used: self.clock,
-            },
-        );
-        while self.bytes > self.budget && self.entries.len() > 1 {
-            let oldest = self
-                .entries
-                .iter()
-                .min_by_key(|(_, cached)| cached.last_used)
-                .map(|(key, _)| key)
-                .expect("a nonempty shaped text cache has an oldest entry");
-            let oldest = ShapedTextKey {
-                text: oldest.text.clone(),
-                family: oldest.family.clone(),
-                size: oldest.size,
-                weight: oldest.weight,
-                italic: oldest.italic,
-                letter_spacing: oldest.letter_spacing,
-                bidi: oldest.bidi,
-                shape_direction: oldest.shape_direction,
-                scale: oldest.scale,
-            };
-            if let Some(evicted) = self.entries.remove(&oldest) {
-                self.bytes = self.bytes.saturating_sub(evicted.bytes);
-            }
-        }
-    }
-}
-
-fn shaped_text_bytes(text: &str, shaped: &ShapedText) -> usize {
-    size_of::<ShapedTextKey>()
-        + size_of::<CachedShapedText>()
-        + text.len()
-        + shaped.clusters.len() * size_of::<ShapedCluster>()
+fn shaped_text_bytes(shaped: &ShapedText) -> usize {
+    size_of::<ShapedText>()
+        + shaped.clusters.capacity() * size_of::<ShapedCluster>()
+        + shaped.segments.capacity() * size_of::<ShapedSegment>()
         + shaped
             .segments
             .iter()
-            .map(|segment| {
-                size_of::<ShapedSegment>() + segment.glyphs.len() * size_of::<PositionedGlyph>()
-            })
+            .map(|segment| segment.glyphs.capacity() * size_of::<PositionedGlyph>())
             .sum::<usize>()
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct MetricKey {
-    text: String,
-    family: FontFamily,
-    size: u32,
-    weight: FontWeight,
-    italic: bool,
-    letter_spacing: u32,
-    shape_direction: crate::model::flow::BaseDirection,
 }
 
 #[derive(Clone)]
@@ -432,9 +343,12 @@ pub struct FontSystem {
     collection: Collection,
     source_cache: SourceCache,
     scale_context: ScaleContext,
-    metric_cache: HashMap<MetricKey, TextMetrics>,
-    shaper_data_cache: SmallLru<ShaperDataKey, ShaperData>,
-    shaped_text_cache: ShapedTextCache,
+    metric_cache: TextCache<TextMetrics>,
+    cache_budget: CacheBudget,
+    stats: FontSystemStats,
+    plan_capacity: usize,
+    shaper_data_cache: SmallLru<ShaperDataKey, FaceShaper>,
+    shaped_text_cache: TextCache<Arc<ShapedText>>,
     glyph_image_cache: GlyphImageCache,
     body_fonts: Vec<String>,
     code_fonts: Vec<String>,
@@ -496,10 +410,16 @@ impl FontSystem {
             collection,
             source_cache: SourceCache::new(Default::default()),
             scale_context: ScaleContext::new(),
-            metric_cache: HashMap::new(),
+            metric_cache: TextCache::default(),
+            cache_budget: CacheBudget {
+                limit: 32 * 1024 * 1024,
+                ..CacheBudget::default()
+            },
+            stats: FontSystemStats::default(),
+            plan_capacity: 8,
             // Match Parley's deliberately small per-font ShaperData cache.
             shaper_data_cache: SmallLru::new(16),
-            shaped_text_cache: ShapedTextCache::new(SHAPED_TEXT_CACHE_BUDGET),
+            shaped_text_cache: TextCache::default(),
             glyph_image_cache: GlyphImageCache::new(GLYPH_IMAGE_CACHE_BUDGET),
             body_fonts: body_fonts.to_vec(),
             code_fonts: code_fonts.to_vec(),
@@ -511,6 +431,90 @@ impl FontSystem {
             emphasized_coverage_key: emphasized_gamma.to_bits(),
             hinting,
             positioning,
+        }
+    }
+
+    pub fn cache_bytes(&self) -> usize {
+        self.cache_budget.used
+    }
+    pub(crate) fn cache_limit(&self) -> usize {
+        self.cache_budget.limit
+    }
+    pub fn stats(&self) -> FontSystemStats {
+        let mut stats = self.stats;
+        stats.evictions = self.cache_budget.evictions;
+        stats
+    }
+    pub(crate) fn take_stats(&mut self) -> FontSystemStats {
+        let stats = self.stats();
+        self.stats = FontSystemStats::default();
+        self.cache_budget.evictions = 0;
+        stats
+    }
+    pub(crate) fn set_cache_budget(&mut self, limit: usize) {
+        self.cache_budget.limit = limit;
+        self.glyph_image_cache.budget = limit;
+        while self.cache_budget.used > limit {
+            if self.glyph_image_cache.evict(&mut self.cache_budget) {
+                continue;
+            }
+            if self.metric_cache.evict(&mut self.cache_budget) {
+                continue;
+            }
+            if !self.shaped_text_cache.evict(&mut self.cache_budget) {
+                break;
+            }
+        }
+    }
+    pub(crate) fn shrink_cache_storage(&mut self) {
+        self.metric_cache.shrink_storage();
+        self.shaped_text_cache.shrink_storage();
+        let glyphs = &mut self.glyph_image_cache.entries;
+        glyphs.resize(std::num::NonZeroUsize::new(glyphs.len().max(1)).unwrap());
+        glyphs.resize(std::num::NonZeroUsize::MAX);
+    }
+
+    pub fn clear_caches(&mut self) {
+        self.shaper_data_cache = SmallLru::new(16);
+        self.metric_cache.clear(&mut self.cache_budget);
+        self.shaped_text_cache.clear(&mut self.cache_budget);
+        while self.glyph_image_cache.evict(&mut self.cache_budget) {}
+    }
+    pub(crate) fn set_plan_capacity(&mut self, capacity: usize) {
+        if self.plan_capacity == capacity {
+            return;
+        }
+        self.plan_capacity = capacity;
+        for entry in &mut self.shaper_data_cache.entries {
+            entry.value.plans.truncate(capacity);
+            if entry.value.plans.capacity() > capacity {
+                entry.value.plans.shrink_to_fit();
+            }
+        }
+    }
+    pub(crate) fn set_face_capacity(&mut self, capacity: usize) {
+        let capacity = capacity.max(1);
+        if self.shaper_data_cache.capacity != capacity {
+            self.shaper_data_cache = SmallLru::new(capacity);
+        }
+    }
+    pub(crate) fn cached_faces(&self) -> usize {
+        self.shaper_data_cache.entries.len()
+    }
+    pub(crate) fn cached_plans(&self) -> usize {
+        self.shaper_data_cache
+            .entries
+            .iter()
+            .map(|entry| entry.value.plans.len())
+            .sum()
+    }
+
+    pub(crate) fn rasterization(&self) -> RasterizationOptions {
+        RasterizationOptions {
+            regular_gamma: f32::from_bits(self.regular_coverage_key),
+            emphasized_gamma: f32::from_bits(self.emphasized_coverage_key),
+            hinting: self.hinting,
+            positioning: self.positioning,
         }
     }
 
@@ -526,14 +530,16 @@ impl FontSystem {
                 self.registered_families.push(family);
             }
         }
-        self.metric_cache.clear();
+        self.stats.registrations += 1;
+        self.clear_caches();
         self.shaper_data_cache = SmallLru::new(16);
-        self.shaped_text_cache = ShapedTextCache::new(SHAPED_TEXT_CACHE_BUDGET);
-        self.glyph_image_cache = GlyphImageCache::new(GLYPH_IMAGE_CACHE_BUDGET);
         true
     }
 
     pub fn set_author_fonts(&mut self, enabled: bool) {
+        if self.author_fonts != enabled {
+            self.clear_caches();
+        }
         self.author_fonts = enabled;
     }
 
@@ -547,18 +553,11 @@ impl FontSystem {
     }
 
     pub fn measure(&mut self, text: &str, style: &TextStyle) -> TextMetrics {
-        let key = MetricKey {
-            text: text.to_owned(),
-            family: style.family.clone(),
-            size: style.size.to_bits(),
-            weight: style.weight,
-            italic: style.italic,
-            letter_spacing: style.letter_spacing.to_bits(),
-            shape_direction: style.shape_direction,
-        };
-        if let Some(metrics) = self.metric_cache.get(&key) {
+        if let Some(metrics) = self.metric_cache.get(text, style, 1.0) {
+            self.stats.metric_hits += 1;
             return *metrics;
         }
+        self.stats.metric_misses += 1;
         let segments = self.shape(text, style, 1.0);
         let width = segments
             .segments
@@ -580,7 +579,8 @@ impl FontSystem {
             ascent,
             descent,
         };
-        self.metric_cache.insert(key, metrics);
+        self.metric_cache
+            .insert_new(text, style, 1.0, metrics, 0, &mut self.cache_budget);
         metrics
     }
 
@@ -653,23 +653,24 @@ impl FontSystem {
                     hinting,
                 };
                 let resource_id = key.paint_resource_id();
-                let image = glyph_image_cache.get_or_insert_with(key, || {
-                    let mut renderer = Render::new(&[
-                        Source::ColorOutline(0),
-                        Source::ColorBitmap(StrikeWith::BestFit),
-                        Source::Outline,
-                    ]);
-                    renderer
-                        .offset(swash::zeno::Vector::new(x_bin.as_float(), y_bin.as_float()))
-                        .default_color([color[0], color[1], color[2], 255]);
-                    renderer.render(&mut scaler, glyph.id).map(|mut image| {
-                        if let Content::Mask = image.content {
-                            apply_coverage(&mut image.data, coverage);
-                        }
-                        image
-                    })
-                });
-                if let Some(image) = image {
+                let image =
+                    glyph_image_cache.get_or_insert_with(key, &mut self.cache_budget, || {
+                        let mut renderer = Render::new(&[
+                            Source::ColorOutline(0),
+                            Source::ColorBitmap(StrikeWith::BestFit),
+                            Source::Outline,
+                        ]);
+                        renderer
+                            .offset(swash::zeno::Vector::new(x_bin.as_float(), y_bin.as_float()))
+                            .default_color([color[0], color[1], color[2], 255]);
+                        renderer.render(&mut scaler, glyph.id).map(|mut image| {
+                            if let Content::Mask = image.content {
+                                apply_coverage(&mut image.data, coverage);
+                            }
+                            image
+                        })
+                    });
+                if let Some(image) = image.as_ref() {
                     let x = base_x + image.placement.left;
                     let y = base_y - image.placement.top;
                     match image.content {
@@ -701,11 +702,19 @@ impl FontSystem {
 
     fn shape(&mut self, text: &str, style: &TextStyle, scale: f32) -> Arc<ShapedText> {
         if let Some(shaped) = self.shaped_text_cache.get(text, style, scale) {
-            return shaped;
+            self.stats.shaped_hits += 1;
+            return Arc::clone(shaped);
         }
+        self.stats.shaped_misses += 1;
         let shaped = Arc::new(self.shape_uncached(text, style, scale));
-        self.shaped_text_cache
-            .insert(text, style, scale, Arc::clone(&shaped));
+        self.shaped_text_cache.insert_new(
+            text,
+            style,
+            scale,
+            Arc::clone(&shaped),
+            shaped_text_bytes(&shaped),
+            &mut self.cache_budget,
+        );
         shaped
     }
 
@@ -734,6 +743,8 @@ impl FontSystem {
         )
         .unwrap_or_default();
 
+        let stats = &mut self.stats;
+        let plan_capacity = self.plan_capacity;
         let mut segments: Vec<_> = runs
             .into_iter()
             .filter_map(|(face, text, source_offset)| {
@@ -743,9 +754,15 @@ impl FontSystem {
                         blob_id: face.blob.id(),
                         index: face.index,
                     },
-                    || ShaperData::new(&font),
+                    || {
+                        stats.shaper_data_builds += 1;
+                        FaceShaper {
+                            data: ShaperData::new(&font),
+                            plans: Vec::new(),
+                        }
+                    },
                 );
-                let shaper = shaper_data.shaper(&font).build();
+                let shaper = shaper_data.data.shaper(&font).build();
                 let mut buffer = UnicodeBuffer::new();
                 buffer.push_str(&text);
                 buffer.guess_segment_properties();
@@ -758,10 +775,44 @@ impl FontSystem {
                     }
                     crate::model::flow::BaseDirection::Auto => {}
                 }
+                // We only guess (never explicitly set) the script. HarfRust's
+                // getter returns UNKNOWN when guessing left the buffer's script
+                // unset; preserve that None rather than changing buffer input.
+                let script = buffer.script();
+                let script = (script != harfrust::script::UNKNOWN).then_some(script);
+                let language = buffer.language();
+                let key = ShapePlanKey::new(script, buffer.direction()).language(language.as_ref());
+                let plan = if plan_capacity == 0 {
+                    stats.plan_builds += 1;
+                    None
+                } else {
+                    if let Some(index) = shaper_data.plans.iter().position(|plan| key.matches(plan))
+                    {
+                        stats.plan_hits += 1;
+                        if index + 1 != shaper_data.plans.len() {
+                            let plan = shaper_data.plans.remove(index);
+                            shaper_data.plans.push(plan);
+                        }
+                    } else {
+                        stats.plan_builds += 1;
+                        if shaper_data.plans.len() == plan_capacity {
+                            shaper_data.plans.remove(0);
+                        }
+                        shaper_data.plans.push(ShapePlan::new(
+                            &shaper,
+                            buffer.direction(),
+                            script,
+                            language.as_ref(),
+                            &[],
+                        ));
+                    }
+                    Some(shaper_data.plans.last().expect("a plan was selected"))
+                };
                 let precision = 64.0;
                 let shaped = shaper.shape(
                     buffer,
                     ShapeOptions::new()
+                        .plan(plan)
                         .scale(Some((style.size * scale * precision).round() as i32)),
                 );
                 let glyphs = shaped
@@ -1221,12 +1272,16 @@ mod tests {
 
         let entry_bytes = glyph_image_bytes(&image());
         let mut cache = GlyphImageCache::new(entry_bytes * 2);
-        cache.get_or_insert_with(key(1), image);
-        cache.get_or_insert_with(key(2), image);
-        cache.get_or_insert_with(key(1), || {
+        let mut budget = CacheBudget {
+            limit: entry_bytes * 2,
+            ..CacheBudget::default()
+        };
+        cache.get_or_insert_with(key(1), &mut budget, image);
+        cache.get_or_insert_with(key(2), &mut budget, image);
+        cache.get_or_insert_with(key(1), &mut budget, || {
             panic!("a cached glyph must not be rendered again")
         });
-        cache.get_or_insert_with(key(3), image);
+        cache.get_or_insert_with(key(3), &mut budget, image);
 
         assert_eq!(cache.entries.len(), 2);
         assert!(cache.entries.contains(&key(1)));

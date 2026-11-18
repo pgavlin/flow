@@ -3,6 +3,29 @@
 Use the Rust toolchain pinned in `rust-toolchain.toml`. Keep changes focused and
 include regression tests for behavior changes.
 
+## Performance benchmarks
+
+For performance-affecting changes, run the perf suite from the repository root:
+
+```sh
+cargo install --locked cargo-criterion --version 1.1.0 # once
+cargo perf
+```
+
+Review the results, including elapsed time, allocation counts, peak/retained
+memory, and measurement configuration.
+
+Once satisfied with the results, accept them as the new baseline:
+
+```sh
+cargo perf --accept
+```
+
+Commit the updated baseline with the code it measured.
+
+See [performance benchmarks](docs/performance.md) for more information about
+performance.
+
 ## Releasing
 
 `flow_cache`, `flow_document`, and `flow_publication` share a version and are

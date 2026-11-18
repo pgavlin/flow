@@ -1,4 +1,4 @@
-# Local build/lint runner
+# Local development tasks
 
 Run from the repository root:
 
@@ -9,8 +9,8 @@ cargo lint --all
 cargo lint --help
 ```
 
-The Cargo aliases run a dependency-free Rust build/lint tool. Local builds, CI,
-and releases use the compiler pinned in `rust-toolchain.toml`.
+The Cargo aliases run a Rust host tool, separate from the engine workspace.
+Local builds, CI, and releases use the compiler pinned in `rust-toolchain.toml`.
 
 ## Browser demo build
 
@@ -25,6 +25,42 @@ see [reader setup](../../examples/reader/README.md#web-no-bundler-or-js-framewor
 Output is always `examples/reader/target/web`, with compilation isolated under
 `examples/reader/target` even if `CARGO_TARGET_DIR` is set. Version checks happen
 before compilation.
+
+## Performance capture and comparisons
+
+```sh
+cargo perf                 # Full timing suite, then three serial allocation runs.
+cargo perf --accept        # Accept the latest complete capture; do not rerun.
+cargo perf --compare before.jsonl after.jsonl
+```
+
+Capture requires cargo-criterion (`cargo install --locked cargo-criterion
+--version 1.1.0`). Results and comparisons go under `target/performance/latest/`;
+failed runs leave the previous capture untouched. Acceptance validates the
+capture and replaces `docs/performance-baseline/`, removing obsolete files.
+Neither command commits changes. Always rerun after changing the measured code
+or configuration, and run these commands serially. Partial/filtered captures
+are not supported by this workflow.
+
+Timing reports compare typical point estimates; allocation reports show changed
+counters using medians across three runs, retaining all raw data and variation
+ranges. Review the report and environment metadata before accepting.
+
+`perf --compare` also accepts two full capture directories to compare timing and
+memory together (for example, `docs/performance-baseline` and
+`target/performance/latest`). For timing-only comparisons, it accepts
+cargo-criterion JSON message streams and the repository's saved
+`timing.json` format, including comparisons between the two formats. Prints
+before/after times and percentage changes; missing cases are marked as added
+or removed. It uses cargo-criterion's `typical` estimate (slope when available,
+otherwise mean) and ignores change classifications from unrelated runs.
+Geomean summary rows appear below the results, with equal weight for every
+matched positive pair, including hidden unchanged cases. Timing and memory
+metrics have independent summaries; pair counts are shown, zeros/missing cases
+are excluded, and an empty summary is `n/a`. No statistical significance is
+inferred. Timing-file comparisons do not include allocation reports.
+
+See [performance measurement](../../docs/performance.md) for capture commands.
 
 ## Checks
 

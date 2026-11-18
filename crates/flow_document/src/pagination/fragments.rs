@@ -62,10 +62,11 @@ impl ComposedPage {
     }
 
     pub fn page_y_for_document_y(&self, document_y: f32) -> Option<f32> {
-        if let Some(header) = self.repeated_table_header {
-            if document_y >= header.source_y && document_y < header.source_y + header.height {
-                return Some(document_y - header.source_y);
-            }
+        if let Some(header) = self.repeated_table_header
+            && document_y >= header.source_y
+            && document_y < header.source_y + header.height
+        {
+            return Some(document_y - header.source_y);
         }
         if document_y < self.start_y || document_y >= self.end_y {
             return None;

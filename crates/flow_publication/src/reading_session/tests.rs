@@ -547,6 +547,173 @@ fn background_pagination_reuses_resident_history_without_materialization_request
     assert_eq!(session.current_target().unwrap().document, key("two"));
 }
 
+/// Drive a synthetic publication without source files or link bindings.
+fn service_synthetic_chapters(session: &mut ReadingSession) -> Vec<SessionEffect> {
+    let mut transcript = Vec::new();
+    for _ in 0..400 {
+        let effects = session.take_effects().unwrap();
+        let mut more = false;
+        for effect in &effects {
+            match effect {
+                SessionEffect::LoadDocument(request) => {
+                    session
+                        .provide_document(request.id, import("Synthetic chapter text."))
+                        .unwrap();
+                    more = true;
+                }
+                SessionEffect::ContinueWork => more = true,
+                SessionEffect::LoadResource(_)
+                | SessionEffect::ResolvePublication { .. }
+                | SessionEffect::ResolveLink { .. } => {
+                    panic!("unexpected host work {effect:?}")
+                }
+                _ => (),
+            }
+        }
+        transcript.extend(effects);
+        if !more {
+            return transcript;
+        }
+    }
+    panic!("session produced unbounded synthetic chapter work");
+}
+
+#[test]
+fn background_pagination_waits_for_image_metadata_before_composing() {
+    let (mut session, handle) = loaded();
+    // Supply a background job directly to isolate metadata scheduling from
+    // foreground rendering and prefetch. No actual image bytes are needed.
+    session.set_background_request_limit(3);
+    session.set_reading_mode(ReadingMode::Paginated);
+    assert!(session.install_publication_page_index(vec![Some(1), None]));
+    session
+        .accept_pagination_document(
+            DocumentCacheKey {
+                publication: handle,
+                document: key("two"),
+            },
+            CachedDocument {
+                imported: import("Text. ![a](a.png) ![b](b.png) ![c](c.png)"),
+                semantic_key: None,
+            },
+        )
+        .unwrap();
+    session.advance_pagination().unwrap();
+    let requests = session
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            SessionEffect::LoadResource(request) if request.kind == ResourceKind::ImageMetadata => {
+                Some(request.id)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    let mut premature_compositions = Vec::new();
+    for remaining in (1..=3).rev() {
+        let job = session
+            .publication_pagination
+            .as_ref()
+            .unwrap()
+            .job
+            .as_ref()
+            .unwrap();
+        assert_eq!(job.waiting_metadata.len(), remaining);
+        premature_compositions.push(job.viewer.active_composition().is_some());
+        assert!(!session.publication_pagination_complete());
+        session
+            .provide_resource(
+                requests[3 - remaining],
+                PreparedResource::ImageMetadata {
+                    width: 100,
+                    height: 100,
+                },
+            )
+            .unwrap();
+    }
+    // Completion must still work once all dimensions are available.
+    assert!(session.publication_pagination_complete());
+    assert_eq!(session.current_target().unwrap().document, key("one"));
+    assert_eq!(
+        premature_compositions,
+        vec![false; 3],
+        "background pagination composed with unresolved image dimensions"
+    );
+}
+
+#[test]
+fn background_pagination_does_not_reimport_prefetched_neighbors() {
+    let mut description = publication("r1").description().clone();
+    description.documents = (0..77)
+        .map(|index| DocumentDescriptor {
+            key: key(&format!("chapter-{index}")),
+            title: String::new(),
+            fonts: Vec::new(),
+        })
+        .collect();
+    description.reading_order = description
+        .documents
+        .iter()
+        .map(|document| document.key.clone())
+        .collect();
+    description.navigation.clear();
+    let mut session = ReadingSession::new(Settings::default());
+    session.resize((320, 480));
+    let handle = session
+        .register_publication(Publication::new(description).unwrap())
+        .unwrap();
+    session.open_target(handle, target("chapter-0")).unwrap();
+    let mut transcript = service_synthetic_chapters(&mut session);
+    // The adjacent chapter is already prefetched before pagination starts.
+    assert!(session.document_cache.contains_key(&DocumentCacheKey {
+        publication: handle,
+        document: key("chapter-1"),
+    }));
+    session.set_reading_mode(ReadingMode::Paginated);
+    session.prepare_publication_pagination().unwrap();
+    transcript.extend(service_synthetic_chapters(&mut session));
+    assert!(session.publication_pagination_complete());
+    assert_eq!(session.publication_page_index().unwrap().len(), 77);
+    assert_eq!(session.current_target().unwrap().document, key("chapter-0"));
+    let neighbor_prefetches = transcript.iter().filter(|effect| matches!(effect,
+        SessionEffect::LoadDocument(request)
+            if request.purpose == RequestPurpose::Prefetch && request.document == key("chapter-1")
+    )).count();
+    assert_eq!(
+        neighbor_prefetches, 1,
+        "pagination evicted and reimported the prefetched neighbor"
+    );
+    let fonts = session.font_context_stats();
+    assert_eq!(
+        fonts.environment_builds, 1,
+        "all pagination viewers must reuse the foreground font environment"
+    );
+    assert!(fonts.environment_hits >= 77);
+    assert!(fonts.fonts.metric_hits > 0);
+    assert!(fonts.fonts.plan_hits > 0);
+}
+
+#[test]
+fn host_font_cache_policy_changes_preserve_the_publication_index() {
+    let (mut session, _) = loaded();
+    session.set_reading_mode(ReadingMode::Paginated);
+    session.prepare_publication_pagination().unwrap();
+    service(&mut session);
+    let pages = session.publication_page_index().unwrap().to_vec();
+    session.set_font_context_options(flow_document::font_context::FontContextOptions {
+        max_environments: 0,
+        cache_bytes: 0,
+        plans_per_face: 0,
+        max_faces_per_environment: 1,
+    });
+    assert!(session.publication_pagination_complete());
+    assert_eq!(session.publication_page_index(), Some(pages.as_slice()));
+    assert!(session.prepare_pagination(320, 480).is_some());
+    assert_eq!(session.font_context_stats().cache_bytes, 0);
+    assert_eq!(session.font_context_stats().environments, 0);
+}
+
 #[test]
 fn rendering_uses_the_coordinated_host_surface_path() {
     let (mut session, _) = loaded();

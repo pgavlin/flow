@@ -91,6 +91,7 @@ struct Navigation {
 /// There is no loader callback, URI router, mutable viewer or mutable registry.
 pub struct ReadingSession {
     viewer: DocumentViewer,
+    font_context: flow_document::font_context::FontContext,
     settings: Settings,
     font_resources: Vec<FontResource>,
     publications: PublicationRegistry,
@@ -123,8 +124,19 @@ pub struct ReadingSession {
 
 impl ReadingSession {
     pub fn new(settings: Settings) -> Self {
+        Self::new_with_font_context(
+            settings,
+            flow_document::font_context::FontContext::default(),
+        )
+    }
+
+    pub fn new_with_font_context(
+        settings: Settings,
+        font_context: flow_document::font_context::FontContext,
+    ) -> Self {
         Self {
             viewer: DocumentViewer::new("", settings.clone()),
+            font_context,
             settings,
             font_resources: Vec::new(),
             publications: PublicationRegistry::new(),
@@ -149,6 +161,29 @@ impl ReadingSession {
             deferred_images: VecDeque::new(),
             publication_pagination: None,
         }
+    }
+
+    /// Recover the reusable font owner when discarding the reading state.
+    pub fn into_font_context(self) -> flow_document::font_context::FontContext {
+        self.font_context
+    }
+
+    pub fn font_context_stats(&self) -> flow_document::font_context::FontContextStats {
+        self.font_context.stats()
+    }
+    pub fn font_context_options(&self) -> flow_document::font_context::FontContextOptions {
+        self.font_context.options()
+    }
+
+    /// Apply host cache limits without invalidating geometry or page indexes.
+    pub fn set_font_context_options(
+        &mut self,
+        options: flow_document::font_context::FontContextOptions,
+    ) {
+        self.font_context.set_options(options);
+    }
+    pub fn trim_font_context(&mut self) {
+        self.font_context.trim();
     }
 
     pub fn viewer(&self) -> &DocumentViewer {
@@ -942,10 +977,16 @@ impl ReadingSession {
         if viewport.0 != 0 && viewport.1 != 0 {
             match self.settings.reading_mode {
                 ReadingMode::Paginated => {
-                    self.viewer.prepare_pagination(viewport.0, viewport.1);
+                    self.viewer
+                        .with_font_context(&mut self.font_context, |viewer| {
+                            viewer.prepare_pagination(viewport.0, viewport.1)
+                        });
                 }
                 ReadingMode::Continuous => {
-                    self.viewer.prepare_continuous_scene(viewport.0, viewport.1);
+                    self.viewer
+                        .with_font_context(&mut self.font_context, |viewer| {
+                            viewer.prepare_continuous_scene(viewport.0, viewport.1)
+                        });
                 }
             }
         }
@@ -1063,8 +1104,17 @@ impl ReadingSession {
         self.trim_document_cache();
     }
     fn trim_document_cache(&mut self) {
+        let neighbors = self.prefetch_targets();
         while self.document_cache.len() > self.document_cache_limit {
-            if let Some(key) = self.document_lru.pop_front() {
+            // Publication pagination scans the entire book. Prefer evicting
+            // those one-off entries over neighbors we'd immediately prefetch
+            // again. Fall back to LRU when the limit cannot hold all neighbors.
+            let candidate = self
+                .document_lru
+                .iter()
+                .position(|key| !neighbors.contains(key))
+                .unwrap_or(0);
+            if let Some(key) = self.document_lru.remove(candidate) {
                 self.document_cache.remove(&key);
             } else {
                 break;
@@ -1178,6 +1228,11 @@ impl ReadingSession {
         for key in self.prefetch_targets() {
             if !self.resident(&key)
                 && !self.document_cache.contains_key(&key)
+                && !self
+                    .publication_pagination
+                    .as_ref()
+                    .and_then(|index| index.job.as_ref())
+                    .is_some_and(|job| job.key == key)
                 && !self.prefetch_failed.contains(&key)
             {
                 self.request_document(key, RequestPurpose::Prefetch, None)?;

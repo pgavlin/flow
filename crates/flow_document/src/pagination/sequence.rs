@@ -314,7 +314,7 @@ impl FirstFit {
             let (chosen, relaxed) = fitting
                 .map(|chosen| (chosen, false))
                 .or_else(|| (first < upper).then(|| (upper - 1, true)))
-                .or_else(|| (first < stream.breaks.len()).then(|| (first, true)))
+                .or_else(|| (first < stream.breaks.len()).then_some((first, true)))
                 .expect("nonempty sequence has a break candidate");
             let selected = stream.breaks[chosen];
             segments.push(SelectedBreak {

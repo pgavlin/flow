@@ -28,8 +28,6 @@ viewing_operations! {
     scroll_to(position: f32) -> ();
     set_continuous_scroll_position(position: f32) -> ();
     focus_adjacent(direction: isize, headings_only: bool) -> bool;
-    toggle_visual_selection() -> ();
-    move_visual_selection(direction: isize, vertical: bool) -> ();
     clear_selection() -> ();
     restore_position(position: ViewerPosition) -> ();
     set_search_query(query: impl Into<String>) -> ();
@@ -42,9 +40,24 @@ viewing_operations! {
     navigate_to_heading(identity: &flow_document::navigation::NavigationIdentity) -> bool;
     navigate_to_fragment(fragment: &str) -> bool;
     activate_focused() -> bool;
+    copy_selection() -> bool;
+}
+
+// Font-dependent interactions borrow the same context as layout and painting.
+macro_rules! font_viewing_operations {
+    ($($name:ident($($argument:ident: $ty:ty),*) -> $result:ty;)+) => {
+        impl ReadingSession {
+            $(pub fn $name(&mut self, $($argument: $ty),*) -> $result {
+                self.viewer.with_font_context(&mut self.font_context, |viewer| viewer.$name($($argument),*))
+            })+
+        }
+    };
+}
+font_viewing_operations! {
+    toggle_visual_selection() -> ();
+    move_visual_selection(direction: isize, vertical: bool) -> ();
     pointer_button(input: PointerButtonInput, now: Duration) -> ();
     pointer_moved(position: Option<(f32, f32)>, now: Duration) -> ();
-    copy_selection() -> bool;
 }
 
 impl ReadingSession {
@@ -85,12 +98,18 @@ impl ReadingSession {
 
     pub fn prepare_continuous_scene(&mut self, width: u32, height: u32) -> bool {
         self.resize((width, height));
-        self.viewer.prepare_continuous_scene(width, height)
+        self.viewer
+            .with_font_context(&mut self.font_context, |viewer| {
+                viewer.prepare_continuous_scene(width, height)
+            })
     }
 
     pub fn prepare_pagination(&mut self, width: u32, height: u32) -> Option<(usize, usize)> {
         self.resize((width, height));
-        self.viewer.prepare_pagination(width, height)
+        self.viewer
+            .with_font_context(&mut self.font_context, |viewer| {
+                viewer.prepare_pagination(width, height)
+            })
     }
 
     pub fn render_into<T: PaintTarget>(
@@ -101,7 +120,10 @@ impl ReadingSession {
         scale: f32,
     ) -> anyhow::Result<()> {
         self.resize((width, height));
-        self.viewer.render_into(target, width, height, scale)
+        self.viewer
+            .with_font_context(&mut self.font_context, |viewer| {
+                viewer.render_into(target, width, height, scale)
+            })
     }
 
     pub fn render_continuous_region_into<T: PaintTarget>(
@@ -114,7 +136,9 @@ impl ReadingSession {
     ) -> anyhow::Result<()> {
         self.resize((width, self.viewer.viewport_size().1));
         self.viewer
-            .render_continuous_region_into(target, width, y, height, scale)
+            .with_font_context(&mut self.font_context, |viewer| {
+                viewer.render_continuous_region_into(target, width, y, height, scale)
+            })
     }
 
     pub fn set_settings(&mut self, settings: Settings) {
@@ -159,7 +183,10 @@ impl ReadingSession {
                     .cloned()
             }));
         }
-        if !self.viewer.set_font_resources(scoped) {
+        if !self
+            .viewer
+            .set_font_resources_with_context(scoped, &mut self.font_context)
+        {
             return false;
         }
         self.font_resources = fonts;
@@ -168,7 +195,10 @@ impl ReadingSession {
     }
 
     pub fn prepare_active_artifacts(&mut self) -> anyhow::Result<()> {
-        self.viewer.prepare_active_artifacts()
+        self.viewer
+            .with_font_context(&mut self.font_context, |viewer| {
+                viewer.prepare_active_artifacts()
+            })
     }
 
     pub fn install_persistent_composition(

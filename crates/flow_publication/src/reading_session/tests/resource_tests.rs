@@ -209,8 +209,10 @@ fn late_metadata_is_scoped_and_cancelled_image_responses_are_rejected() {
 
 #[test]
 fn publication_pagination_waits_for_intrinsic_metadata_and_rebuilds_after_response() {
-    let mut settings = Settings::default();
-    settings.reading_mode = ReadingMode::Paginated;
+    let settings = Settings {
+        reading_mode: ReadingMode::Paginated,
+        ..Default::default()
+    };
     let mut session = ReadingSession::new(settings);
     session.resize((320, 480));
     let handle = session

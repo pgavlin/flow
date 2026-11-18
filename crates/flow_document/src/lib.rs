@@ -22,6 +22,8 @@ pub mod test_fonts;
 pub mod toc;
 
 #[cfg(feature = "render")]
+pub mod font_context;
+#[cfg(feature = "render")]
 #[doc(hidden)]
 pub mod images;
 #[cfg(feature = "render")]

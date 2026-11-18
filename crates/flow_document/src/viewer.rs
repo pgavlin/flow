@@ -254,6 +254,12 @@ pub struct DocumentViewer {
     revisions: ViewerRevisions,
 }
 
+impl crate::font_context::FontHost for DocumentViewer {
+    fn font_slot(&mut self) -> &mut crate::font_context::FontSlot {
+        &mut self.renderer.fonts
+    }
+}
+
 impl DocumentViewer {
     pub fn new(document_name: impl Into<String>, settings: Settings) -> Self {
         let font_size_points = settings.font_size;
@@ -525,6 +531,32 @@ impl DocumentViewer {
             self.focused = Some(focus);
         }
         self.reduce_activation(&pending.activation)
+    }
+
+    /// Exclusively borrow a reusable font owner for one complete operation.
+    /// No font backend is retained in this viewer by contextual operations.
+    pub fn with_font_context<R>(
+        &mut self,
+        context: &mut crate::font_context::FontContext,
+        operation: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        context.scope(self, operation)
+    }
+
+    pub fn set_font_resources_with_context(
+        &mut self,
+        resources: Vec<FontResource>,
+        context: &mut crate::font_context::FontContext,
+    ) -> bool {
+        if !self
+            .renderer
+            .set_font_resources_with_context(resources, context)
+        {
+            return false;
+        }
+        self.revisions.layout = self.revisions.layout.wrapping_add(1);
+        self.request_redraw();
+        true
     }
 
     pub fn set_font_resources(&mut self, resources: Vec<FontResource>) -> bool {
@@ -1036,9 +1068,11 @@ impl DocumentViewer {
         let Some(content_width) = self.persistent_content_width() else {
             return Ok(());
         };
-        self.ensure_layout_artifacts(content_width);
         if self.reading_mode == ReadingMode::Paginated {
+            self.ensure_composition(content_width);
             self.rebuild_paginated_layout(self.size.1)?;
+        } else {
+            self.ensure_layout_artifacts(content_width);
         }
         Ok(())
     }
@@ -1066,7 +1100,7 @@ impl DocumentViewer {
         self.size = (width.max(1), height.max(1));
         self.renderer.set_font_size(self.font_size_points);
         let content_width = self.renderer.effective_content_width(self.size.0);
-        self.ensure_layout_artifacts(content_width)?;
+        self.ensure_composition(content_width)?;
         if let Err(error) = self.rebuild_paginated_layout(self.size.1) {
             self.document_error = Some(format!("pagination failed: {error}"));
             return None;
@@ -1084,6 +1118,28 @@ impl DocumentViewer {
     }
 
     fn ensure_layout_artifacts(&mut self, content_width: f32) -> Option<()> {
+        self.ensure_composition(content_width)?;
+        let composition = self.composition_key?;
+        let continuous_key = ContinuousPlacementKey { composition };
+        if self.continuous_key == Some(continuous_key) {
+            return Some(());
+        }
+        let layout = if let Some(layout) = self.artifact_cache.continuous(continuous_key) {
+            layout
+        } else {
+            let layout = Arc::new(self.composed.continuous_layout());
+            self.artifact_cache
+                .insert_continuous(continuous_key, Arc::clone(&layout));
+            layout
+        };
+        self.layout = layout;
+        self.navigation = NavigationIndex::new(self.document.as_ref()?, &self.layout);
+        self.continuous_key = Some(continuous_key);
+        self.revisions.layout = self.revisions.layout.wrapping_add(1);
+        Some(())
+    }
+
+    fn ensure_composition(&mut self, content_width: f32) -> Option<()> {
         let document = self.document.as_ref()?;
         let composition_key = CompositionKey {
             semantic: self.semantic_key?,
@@ -1091,12 +1147,7 @@ impl DocumentViewer {
             renderer_revision: self.renderer.layout_revision(),
             content_width: content_width.to_bits(),
         };
-        if self.composition_key == Some(composition_key)
-            && self.continuous_key
-                == Some(ContinuousPlacementKey {
-                    composition: composition_key,
-                })
-        {
+        if self.composition_key == Some(composition_key) {
             return Some(());
         }
 
@@ -1112,22 +1163,13 @@ impl DocumentViewer {
                 .insert_composition(composition_key, Arc::clone(&composed));
             composed
         };
-        let continuous_key = ContinuousPlacementKey {
-            composition: composition_key,
-        };
-        let layout = if let Some(layout) = self.artifact_cache.continuous(continuous_key) {
-            layout
-        } else {
-            let layout = Arc::new(composed.continuous_layout());
-            self.artifact_cache
-                .insert_continuous(continuous_key, Arc::clone(&layout));
-            layout
-        };
         self.composed = composed;
-        self.layout = layout;
-        self.navigation = NavigationIndex::new(document, &self.layout);
         self.composition_key = Some(composition_key);
-        self.continuous_key = Some(continuous_key);
+        // Retain semantic navigation, but discard coordinates from a previous
+        // composition. Continuous geometry is built only when requested.
+        self.layout = Arc::new(ContinuousLayout::default());
+        self.continuous_key = None;
+        self.navigation = NavigationIndex::new(document, &self.layout);
         self.pagination_key = None;
         self.pages = Arc::new(PaginatedLayout::default());
         self.revisions.layout = self.revisions.layout.wrapping_add(1);
@@ -1404,6 +1446,10 @@ impl DocumentViewer {
             self.selection = Some(Selection::collapsed(TextPosition::new(offset)));
         }
         self.visual_selection = true;
+        // Keyboard selection needs continuous caret/line geometry, even if
+        // the host has only prepared pagination and has not painted yet.
+        let content_width = self.renderer.effective_content_width(self.size.0);
+        self.ensure_layout_artifacts(content_width);
         self.selection_preferred_x = self
             .selection
             .and_then(|selection| self.renderer.caret_x(&self.layout, selection.active));
@@ -1422,6 +1468,8 @@ impl DocumentViewer {
         if !self.visual_selection {
             return ActionResult::default();
         }
+        let content_width = self.renderer.effective_content_width(self.size.0);
+        self.ensure_layout_artifacts(content_width);
         let Some(selection) = &mut self.selection else {
             return ActionResult::default();
         };
@@ -2341,15 +2389,15 @@ impl DocumentViewer {
             .map(|target| target.identity());
     }
 
-    fn reveal_flow_position(&mut self, _offset: usize, document_y: Option<f32>) {
-        let Some(y) = document_y else {
-            self.request_redraw();
-            return;
-        };
+    fn reveal_flow_position(&mut self, offset: usize, document_y: Option<f32>) {
         if self.reading_mode == ReadingMode::Paginated {
-            self.current_page = self.pages.page_for_y(y);
-            self.page_anchor = None;
-        } else {
+            if self.paginated_layout().is_some() {
+                self.current_page = self.pages.page_for_text(offset);
+                self.page_anchor = None;
+            } else {
+                self.page_anchor = Some(offset);
+            }
+        } else if let Some(y) = document_y {
             let context = self.font_size_points * 2.0;
             self.scroll_y = (y - context).max(0.0);
             self.clamp_scroll();
@@ -2359,14 +2407,11 @@ impl DocumentViewer {
     }
 
     fn reveal_text(&mut self, range: TextRange) {
-        let Some(y) = self.layout.y_for_text(range.start) else {
-            self.request_redraw();
-            return;
-        };
         if self.reading_mode == ReadingMode::Paginated {
-            self.current_page = self.pages.page_for_text(range.start);
-            self.page_anchor = None;
-        } else {
+            self.reveal_flow_position(range.start, None);
+            return;
+        }
+        if let Some(y) = self.layout.y_for_text(range.start) {
             let margin = self.renderer.settings().theme.page_margin;
             let context = self.font_size_points * 2.0;
             let visible_top = self.scroll_y;
@@ -2930,6 +2975,110 @@ mod tests {
     }
 
     #[test]
+    fn pagination_preparation_does_not_materialize_continuous_geometry() {
+        let settings = Settings {
+            reading_mode: ReadingMode::Paginated,
+            ..Settings::default()
+        };
+        let mut viewer = DocumentViewer::new("pagination only", settings);
+        viewer.replace_document(Ok(parse_document(
+            &"Paragraph text with enough words to wrap.\n\n".repeat(80),
+        )));
+        assert!(viewer.prepare_pagination(400, 240).is_some());
+        assert!(viewer.active_composition().is_some());
+        assert!(viewer.paginated_layout().is_some());
+        assert!(viewer.continuous_layout().is_none());
+        assert!(viewer.layout.blocks.is_empty());
+        assert!(viewer.continuous_key.is_none());
+        viewer.prepare_active_artifacts().unwrap();
+        assert!(viewer.continuous_layout().is_none());
+        let composed = Arc::clone(&viewer.composed);
+        let pages = Arc::clone(&viewer.pages);
+        assert!(viewer.prepare_pagination(400, 240).is_some());
+        assert!(Arc::ptr_eq(&composed, &viewer.composed));
+        assert!(Arc::ptr_eq(&pages, &viewer.pages));
+        assert!(viewer.continuous_layout().is_none());
+
+        // Interactive rendering may request continuous geometry for operations
+        // such as visual selection, without recomposing or repaginating.
+        viewer.render(400, 240, 1.0).unwrap();
+        assert!(viewer.continuous_layout().is_some());
+        assert!(Arc::ptr_eq(&composed, &viewer.composed));
+        assert!(Arc::ptr_eq(&pages, &viewer.pages));
+
+        // Reflow must discard old continuous geometry, then switching back to
+        // continuous mode can place the new composition without recomposing.
+        viewer.prepare_pagination(300, 240).unwrap();
+        assert!(viewer.continuous_layout().is_none());
+        assert!(viewer.layout.blocks.is_empty());
+        let reflowed = Arc::clone(&viewer.composed);
+        assert!(!Arc::ptr_eq(&composed, &reflowed));
+        viewer.set_reading_mode(ReadingMode::Continuous);
+        assert!(viewer.prepare_continuous_scene(300, 240));
+        assert!(viewer.continuous_layout().is_some());
+        assert!(Arc::ptr_eq(&reflowed, &viewer.composed));
+    }
+
+    #[test]
+    fn pagination_only_navigation_does_not_require_continuous_geometry() {
+        let settings = Settings {
+            reading_mode: ReadingMode::Paginated,
+            ..Settings::default()
+        };
+        let mut viewer = DocumentViewer::new("pagination navigation", settings);
+        viewer.replace_document(Ok(parse_document(&format!(
+            "# Start\n\n{}\n\n<a id=\"destination\"></a>\n\n# Destination\n\nNeedle.\n",
+            "Filler paragraph with enough words to wrap.\n\n".repeat(80),
+        ))));
+        viewer.prepare_pagination(400, 240).unwrap();
+        assert!(viewer.navigate_to_fragment("destination"));
+        let destination = viewer
+            .document
+            .as_ref()
+            .unwrap()
+            .anchor(&flow::AnchorId::new("destination"))
+            .unwrap()
+            .target
+            .position
+            .offset
+            .as_usize();
+        assert_eq!(viewer.current_page, viewer.pages.page_for_text(destination));
+        assert!(viewer.current_page > 0);
+        viewer.set_search_query("Needle");
+        assert!(viewer.move_to_search_match(false));
+        assert_eq!(
+            viewer.current_page,
+            viewer.pages.page_for_text(viewer.search_matches[0].start)
+        );
+        let heading = viewer.outline().nodes().last().unwrap().identity.clone();
+        assert!(viewer.navigate_to_heading(&heading));
+        assert!(viewer.current_page > 0);
+        assert!(viewer.continuous_layout().is_none());
+        assert!(viewer.layout.blocks.is_empty());
+    }
+
+    #[test]
+    fn pagination_only_preparation_builds_selection_geometry_on_demand() {
+        let settings = Settings {
+            reading_mode: ReadingMode::Paginated,
+            ..Settings::default()
+        };
+        let mut viewer = DocumentViewer::new("pagination selection", settings);
+        viewer.replace_document(Ok(parse_document("alpha beta gamma")));
+        viewer.prepare_pagination(400, 240).unwrap();
+        let composed = Arc::clone(&viewer.composed);
+        let pages = Arc::clone(&viewer.pages);
+        assert!(viewer.continuous_layout().is_none());
+        viewer.toggle_visual_selection();
+        let before = viewer.selection().unwrap();
+        viewer.move_visual_selection(1, false);
+        assert_ne!(viewer.selection().unwrap(), before);
+        assert!(viewer.continuous_layout().is_some());
+        assert!(Arc::ptr_eq(&composed, &viewer.composed));
+        assert!(Arc::ptr_eq(&pages, &viewer.pages));
+    }
+
+    #[test]
     fn read_only_layout_queries_do_not_return_stale_geometry() {
         let mut viewer = DocumentViewer::new("synthetic", Settings::default());
         viewer.replace_document(Ok(parse_document("![Sample](sample.png)")));
@@ -3025,8 +3174,10 @@ mod tests {
 
     #[test]
     fn artifact_cache_reuses_portrait_composition_and_pagination_after_landscape() {
-        let mut settings = Settings::default();
-        settings.reading_mode = ReadingMode::Paginated;
+        let settings = Settings {
+            reading_mode: ReadingMode::Paginated,
+            ..Default::default()
+        };
         let mut viewer = DocumentViewer::new("document.md", settings);
         viewer.replace_document(Ok(parse_document(
             &"cache variants paragraph. ".repeat(400),
@@ -3048,8 +3199,10 @@ mod tests {
 
     #[test]
     fn paint_only_changes_do_not_rebuild_layout_artifacts() {
-        let mut settings = Settings::default();
-        settings.reading_mode = ReadingMode::Paginated;
+        let settings = Settings {
+            reading_mode: ReadingMode::Paginated,
+            ..Default::default()
+        };
         let mut viewer = DocumentViewer::new("document.md", settings);
         viewer.replace_document(Ok(parse_document("alpha beta gamma")));
         viewer.render(480, 720, 1.0).unwrap();
@@ -3077,8 +3230,10 @@ mod tests {
 
     #[test]
     fn typography_changes_use_distinct_composition_and_pagination_keys() {
-        let mut settings = Settings::default();
-        settings.reading_mode = ReadingMode::Paginated;
+        let settings = Settings {
+            reading_mode: ReadingMode::Paginated,
+            ..Default::default()
+        };
         let mut viewer = DocumentViewer::new("document.md", settings);
         viewer.replace_document(Ok(parse_document(&"typography paragraph. ".repeat(200))));
         viewer.render(480, 720, 1.0).unwrap();

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{cell::RefCell, sync::Arc};
 use text_layout::{Item, LineWidths};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -97,6 +97,12 @@ pub(crate) fn compose_flow_document<M: TextMeasurer>(
     let note_markers = footnote_markers(document);
     let units = text_blocks_from(document, styles, document.root(), &note_markers);
     let column_widths = measure_column_widths(&units, measurer, options);
+    let scratch = RefCell::new(ParagraphScratch::default());
+    let context = FlowLayoutContext {
+        options,
+        force_emergency_breaking: false,
+        scratch: &scratch,
+    };
 
     for unit in units {
         let computed = styles
@@ -123,10 +129,7 @@ pub(crate) fn compose_flow_document<M: TextMeasurer>(
                 &column_widths,
                 measurer,
                 0.0,
-                FlowLayoutContext {
-                    options,
-                    force_emergency_breaking: false,
-                },
+                context,
             ),
             TextBlockKind::Preformatted => layout_preformatted(
                 document,
@@ -143,7 +146,7 @@ pub(crate) fn compose_flow_document<M: TextMeasurer>(
                 unit,
                 &column_widths,
                 measurer,
-                options,
+                context,
                 0.0,
                 &note_markers,
             ),
@@ -153,7 +156,7 @@ pub(crate) fn compose_flow_document<M: TextMeasurer>(
                 unit,
                 &column_widths,
                 measurer,
-                options,
+                context,
                 0.0,
             ),
             TextBlockKind::Rule => {
@@ -531,9 +534,9 @@ fn collect_flow_links(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn push_linked_text_items<M: TextMeasurer>(
-    items: &mut Vec<super::LayoutItem>,
-    text: &str,
+fn push_linked_text_items<'text, M: TextMeasurer>(
+    items: &mut super::ParagraphItems<'text>,
+    text: &'text str,
     range: TextRange,
     links: &[(TextRange, crate::model::flow::Destination)],
     link_index: &mut usize,
@@ -569,7 +572,7 @@ fn push_linked_text_items<M: TextMeasurer>(
                 word_breaking,
                 options,
             );
-            set_flow_link(&mut items[first..], None);
+            set_flow_link(items, first, None);
         }
         if linked_start < linked_end {
             let first = items.len();
@@ -585,7 +588,7 @@ fn push_linked_text_items<M: TextMeasurer>(
                 word_breaking,
                 options,
             );
-            set_flow_link(&mut items[first..], Some(destination));
+            set_flow_link(items, first, Some(destination));
             cursor = linked_end;
         }
         *link_index += 1;
@@ -1144,13 +1147,13 @@ fn atomic_is_rtl(bidi: crate::model::flow::BidiState, text: &str) -> bool {
 
 fn extract_atomic_objects(
     lines: &mut [LineLayout],
-    pending: Vec<PendingAtomic>,
+    pending: &mut Vec<PendingAtomic>,
 ) -> Vec<AtomicLayout> {
     let mut buckets = std::collections::HashMap::<
         (usize, usize, u32),
         std::collections::VecDeque<PendingAtomic>,
     >::new();
-    for spec in pending {
+    for spec in pending.drain(..) {
         buckets
             .entry((spec.range.start, spec.range.end, spec.width.to_bits()))
             .or_default()
@@ -1194,23 +1197,66 @@ fn extract_atomic_objects(
     objects
 }
 
-#[derive(Clone, Copy)]
-struct FlowLayoutContext<'a> {
-    options: &'a LayoutOptions,
-    force_emergency_breaking: bool,
+// One composition shares these buffers sequentially across its blocks,
+// including table measurement and cell layout. Owned output never lives here.
+const MAX_ITEM_SCRATCH_BYTES: usize = 256 * 1024;
+const MAX_ATOMIC_SCRATCH_BYTES: usize = 32 * 1024;
+
+#[derive(Default)]
+struct ParagraphScratch<'text> {
+    items: super::ParagraphItems<'text>,
+    pending_atomics: Vec<PendingAtomic>,
 }
 
-fn collect_text_block_items<M: TextMeasurer>(
-    document: &FlowDocument,
+impl<'text> ParagraphScratch<'text> {
+    fn take(&mut self) -> (super::ParagraphItems<'text>, Vec<PendingAtomic>) {
+        debug_assert!(self.items.is_recycled());
+        debug_assert!(self.pending_atomics.is_empty());
+        (
+            std::mem::take(&mut self.items),
+            std::mem::take(&mut self.pending_atomics),
+        )
+    }
+
+    fn recycle(
+        &mut self,
+        mut items: super::ParagraphItems<'text>,
+        mut pending: Vec<PendingAtomic>,
+    ) {
+        // Run destructors for atom text, named styles, and destinations, and
+        // don't pin an oversized block's high-water capacity for later blocks.
+        items.clear_bounded(MAX_ITEM_SCRATCH_BYTES);
+        clear_bounded(&mut pending, MAX_ATOMIC_SCRATCH_BYTES);
+        self.items = items;
+        self.pending_atomics = pending;
+    }
+}
+
+fn clear_bounded<T>(buffer: &mut Vec<T>, max_bytes: usize) {
+    buffer.clear();
+    if buffer.capacity() > max_bytes / std::mem::size_of::<T>() {
+        *buffer = Vec::new();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FlowLayoutContext<'a, 'text> {
+    options: &'a LayoutOptions,
+    force_emergency_breaking: bool,
+    scratch: &'a RefCell<ParagraphScratch<'text>>,
+}
+
+fn collect_text_block_items<'text, M: TextMeasurer>(
+    document: &'text FlowDocument,
     styles: &StyleSnapshot,
     unit: &TextBlock,
     measurer: &M,
-    options: &LayoutOptions,
+    context: FlowLayoutContext<'_, 'text>,
     available_width: f32,
-    force_emergency_breaking: bool,
-) -> (Vec<super::LayoutItem>, Vec<PendingAtomic>) {
-    let mut items = Vec::new();
-    let mut pending_atomics = Vec::new();
+) -> (super::ParagraphItems<'text>, Vec<PendingAtomic>) {
+    let options = context.options;
+    let force_emergency_breaking = context.force_emergency_breaking;
+    let (mut items, mut pending_atomics) = context.scratch.borrow_mut().take();
     let mut stack = vec![(
         unit.node,
         None::<crate::model::flow::BidiState>,
@@ -1266,7 +1312,7 @@ fn collect_text_block_items<M: TextMeasurer>(
                     },
                     options,
                 );
-                set_flow_link(&mut items[first_item..], inherited_link.as_ref());
+                set_flow_link(&mut items, first_item, inherited_link.as_ref());
             }
             NodeKind::HardBreak => {
                 terminate_at(&mut items, Break::Line, Some(text_range(node.text_range)))
@@ -1285,7 +1331,7 @@ fn collect_text_block_items<M: TextMeasurer>(
                     style,
                     measurer,
                 );
-                set_flow_link(&mut items[first_item..], inherited_link.as_ref());
+                set_flow_link(&mut items, first_item, inherited_link.as_ref());
             }
             NodeKind::Checkbox(checkbox) => {
                 if unit.presentation.marker_checkboxes.contains(&id) {
@@ -1326,7 +1372,7 @@ fn collect_text_block_items<M: TextMeasurer>(
                 }
                 push_atomic_item(&mut items, atomic.range, style, atomic.width, atomic.height);
                 let last = items.len().saturating_sub(1);
-                set_flow_link(&mut items[last..], inherited_link.as_ref());
+                set_flow_link(&mut items, last, inherited_link.as_ref());
                 pending_atomics.push(atomic);
             }
             NodeKind::UnsupportedObject(_) if !has_readable_fallback(document, node) => {
@@ -1349,7 +1395,7 @@ fn collect_text_block_items<M: TextMeasurer>(
                 }
                 push_atomic_item(&mut items, atomic.range, style, atomic.width, atomic.height);
                 let last = items.len().saturating_sub(1);
-                set_flow_link(&mut items[last..], inherited_link.as_ref());
+                set_flow_link(&mut items, last, inherited_link.as_ref());
                 pending_atomics.push(atomic);
             }
             _ => stack.extend(
@@ -1457,14 +1503,14 @@ fn resolve_author_box(
     }
 }
 
-fn layout_text_block<M: TextMeasurer>(
-    document: &FlowDocument,
+fn layout_text_block<'text, M: TextMeasurer>(
+    document: &'text FlowDocument,
     styles: &StyleSnapshot,
     unit: TextBlock,
     column_widths: &std::collections::HashMap<usize, f32>,
     measurer: &M,
     y: f32,
-    context: FlowLayoutContext<'_>,
+    context: FlowLayoutContext<'_, 'text>,
 ) -> BlockLayout {
     let base_options = context.options;
     let computed = styles
@@ -1479,6 +1525,7 @@ fn layout_text_block<M: TextMeasurer>(
     } else {
         base_options
     };
+    let context = FlowLayoutContext { options, ..context };
     let block_style = text_style(computed, options, unit.kind);
     let mut geometry = presentation_geometry(&unit.presentation, column_widths, measurer, options);
     let presentation_left = geometry.content_left;
@@ -1499,15 +1546,8 @@ fn layout_text_block<M: TextMeasurer>(
     geometry.content_left = author_box.content_x(box_x);
     let mut available_width = author_box.content_width;
     let mut content_y = author_box.content_y(y);
-    let (mut items, mut pending_atomics) = collect_text_block_items(
-        document,
-        styles,
-        &unit,
-        measurer,
-        options,
-        available_width,
-        context.force_emergency_breaking,
-    );
+    let (mut items, mut pending_atomics) =
+        collect_text_block_items(document, styles, &unit, measurer, context, available_width);
     let longest_unbreakable = items
         .iter()
         .filter_map(|item| match item {
@@ -1534,14 +1574,14 @@ fn layout_text_block<M: TextMeasurer>(
             geometry.content_left = author_box.content_x(box_x);
             available_width = author_box.content_width;
             content_y = author_box.content_y(y);
+            context.scratch.borrow_mut().recycle(items, pending_atomics);
             (items, pending_atomics) = collect_text_block_items(
                 document,
                 styles,
                 &unit,
                 measurer,
-                options,
+                context,
                 available_width,
-                context.force_emergency_breaking,
             );
         }
     }
@@ -1549,40 +1589,39 @@ fn layout_text_block<M: TextMeasurer>(
         indent.resolve(block_style.size, available_width)
     });
     if text_indent > 0.0 {
+        let style = items.push_style(block_style.clone());
         let mut indent = make_atom(
+            &items,
             "",
             TextRange {
                 start: unit.range.start,
                 end: unit.range.start,
             },
-            block_style.clone(),
+            style,
             measurer,
         );
         indent.metrics.width = text_indent;
-        items.insert(
-            0,
-            Item::Box {
-                width: text_indent,
-                data: indent,
-            },
-        );
+        items.insert_box(0, indent);
     }
     terminate(&mut items, Break::Paragraph);
     let alignment = computed.text_alignment();
     let justify = alignment.is_none()
         || matches!(alignment, Some(crate::model::flow::TextAlignment::Justify));
-    let first_content = items
-        .iter()
-        .position(|item| matches!(item, Item::Box { data, .. } if !data.text.is_empty()));
+    let first_content = items.iter().position(
+        |item| matches!(item, Item::Box { data, .. } if !items.atom(*data).text.is_empty()),
+    );
     if let (Some(index), Some(first_letter)) = (first_content, computed.first_letter()) {
         split_first_letter_item(&mut items, index, first_letter, measurer);
     }
     let initial = first_content.filter(
-        |index| matches!(&items[*index], Item::Box { data, .. } if !data.atomic && data.style.initial_letter.is_some()),
+        |index| matches!(&items[*index], Item::Box { data, .. } if !items.atom(*data).atomic && items.style(items.atom(*data).style).initial_letter.is_some()),
     );
     let initial_sink = initial
         .and_then(|index| match &items[index] {
-            Item::Box { data, .. } => data.style.initial_letter.map(|value| value.sink),
+            Item::Box { data, .. } => items
+                .style(items.atom(*data).style)
+                .initial_letter
+                .map(|value| value.sink),
             _ => None,
         })
         .unwrap_or(0);
@@ -1590,14 +1629,17 @@ fn layout_text_block<M: TextMeasurer>(
         let Item::Box { data: cap, .. } = items.remove(index) else {
             unreachable!()
         };
+        let cap = items.take_atom(cap);
         materialize_initial_letter_lines(
-            items,
+            &items,
             cap,
-            available_width,
-            geometry.content_left,
-            content_y,
+            InitialLetterGeometry {
+                available_width,
+                left: geometry.content_left,
+                top: content_y,
+                origin_indent: text_indent.max(0.0),
+            },
             &block_style,
-            text_indent.max(0.0),
             measurer,
             options,
             justify,
@@ -1605,7 +1647,7 @@ fn layout_text_block<M: TextMeasurer>(
     } else {
         let breaks = line_breaks(&items, available_width);
         materialize_lines(
-            items,
+            &items,
             breaks,
             geometry.content_left,
             content_y,
@@ -1661,7 +1703,8 @@ fn layout_text_block<M: TextMeasurer>(
         });
     }
     insert_marker(&mut lines, geometry.marker, unit.range, options);
-    let mut atomic_objects = extract_atomic_objects(&mut lines, pending_atomics);
+    let mut atomic_objects = extract_atomic_objects(&mut lines, &mut pending_atomics);
+    context.scratch.borrow_mut().recycle(items, pending_atomics);
     inherit_flow_link(
         &mut lines,
         &mut atomic_objects,
@@ -1698,8 +1741,8 @@ fn layout_text_block<M: TextMeasurer>(
     }
 }
 
-fn split_first_letter_item<M: TextMeasurer>(
-    items: &mut Vec<super::LayoutItem>,
+fn split_first_letter_item<'text, M: TextMeasurer>(
+    items: &mut super::ParagraphItems<'text>,
     index: usize,
     initial: crate::model::flow::InitialLetter,
     measurer: &M,
@@ -1707,7 +1750,8 @@ fn split_first_letter_item<M: TextMeasurer>(
     let Item::Box { data, .. } = &items[index] else {
         return;
     };
-    if data.atomic || data.style.initial_letter.is_some() || data.text.is_empty() {
+    let data = items.atom(*data);
+    if data.atomic || items.style(data.style).initial_letter.is_some() || data.text.is_empty() {
         return;
     }
     let original = data.clone();
@@ -1727,19 +1771,20 @@ fn split_first_letter_item<M: TextMeasurer>(
     let mut cap_text = original.text[..initial_end].to_owned();
     let mut cap_end = original.range.start.saturating_add(initial_end);
     let mut consumed_through = index;
-    let mut trailing: Option<Atom> = None;
+    let mut trailing: Option<Atom<'text>> = None;
     if initial_has_letter {
         if initial_end < original.text.len() {
             let mut remainder = make_atom(
-                &original.text[initial_end..],
+                items,
+                original.text_slice(initial_end..original.text.len()),
                 TextRange {
                     start: cap_end,
                     end: original.range.end,
                 },
-                original.style.clone(),
+                original.style,
                 measurer,
             );
-            remainder.flow_link = original.flow_link.clone();
+            remainder.flow_link = original.flow_link;
             trailing = Some(remainder);
         }
     } else if let Some((next_index, next)) =
@@ -1748,8 +1793,9 @@ fn split_first_letter_item<M: TextMeasurer>(
             .enumerate()
             .skip(index + 1)
             .find_map(|(next_index, item)| match item {
-                Item::Box { data, .. } if !data.atomic && !data.text.is_empty() => {
-                    Some((next_index, data.clone()))
+                Item::Box { data, .. } => {
+                    let atom = items.atom(*data);
+                    (!atom.atomic && !atom.text.is_empty()).then(|| (next_index, atom.clone()))
                 }
                 _ => None,
             })
@@ -1763,13 +1809,14 @@ fn split_first_letter_item<M: TextMeasurer>(
                     .any(char::is_alphanumeric)
                     .then_some(offset + grapheme.len())
             })
-            .unwrap_or_else(|| next.text.len());
+            .unwrap_or(next.text.len());
         cap_text.push_str(&next.text[..next_end]);
         cap_end = next.range.start.saturating_add(next_end);
         consumed_through = next_index;
         if next_end < next.text.len() {
             let mut remainder = make_atom(
-                &next.text[next_end..],
+                items,
+                next.text_slice(next_end..next.text.len()),
                 TextRange {
                     start: cap_end,
                     end: next.range.end,
@@ -1785,10 +1832,12 @@ fn split_first_letter_item<M: TextMeasurer>(
         return;
     }
 
-    let mut cap_style = original.style;
+    let mut cap_style = items.style(original.style).clone();
     cap_style.initial_letter = Some(initial);
+    let cap_style = items.push_style(cap_style);
     let mut cap = make_atom(
-        &cap_text,
+        items,
+        cap_text,
         TextRange {
             start: original.range.start,
             end: cap_end,
@@ -1797,69 +1846,71 @@ fn split_first_letter_item<M: TextMeasurer>(
         measurer,
     );
     cap.flow_link = original.flow_link;
-    items[index] = Item::Box {
-        width: cap.metrics.width,
-        data: cap,
-    };
+    items.replace_box(index, cap);
     if consumed_through > index {
         items.drain(index + 1..=consumed_through);
     }
     if let Some(remainder) = trailing {
-        items.insert(
-            index + 1,
-            Item::Box {
-                width: remainder.metrics.width,
-                data: remainder,
-            },
-        );
+        items.insert_box(index + 1, remainder);
     }
 }
 
-fn materialize_initial_letter_lines<M: TextMeasurer>(
-    items: Vec<super::LayoutItem>,
-    mut cap: Atom,
+struct InitialLetterGeometry {
     available_width: f32,
     left: f32,
     top: f32,
-    block_style: &TextStyle,
     origin_indent: f32,
+}
+
+fn materialize_initial_letter_lines<M: TextMeasurer>(
+    items: &super::ParagraphItems,
+    mut cap: Atom<'_>,
+    geometry: InitialLetterGeometry,
+    block_style: &TextStyle,
     measurer: &M,
     options: &LayoutOptions,
     justify: bool,
 ) -> Vec<LineLayout> {
-    let initial = cap.style.initial_letter.expect("initial letter marker");
+    let InitialLetterGeometry {
+        available_width,
+        left,
+        top,
+        origin_indent,
+    } = geometry;
+    let mut cap_style = items.style(cap.style).clone();
+    let initial = cap_style.initial_letter.expect("initial letter marker");
     let normal_metrics = measurer.measure("M", block_style);
     let (normal_line_height, _) = line_box(normal_metrics, block_style.size, options.line_spacing);
     if !initial.legacy_float {
         let target_height = (initial.size_per_mille as f32 / 1_000.0 - 1.0) * normal_line_height
             + normal_metrics.ascent;
         if cap.metrics.ascent > 0.0 {
-            cap.style.size *= target_height.max(normal_metrics.ascent) / cap.metrics.ascent;
-            cap.metrics = measurer.measure(&cap.text, &cap.style);
+            cap_style.size *= target_height.max(normal_metrics.ascent) / cap.metrics.ascent;
+            cap.metrics = measurer.measure(&cap.text, &cap_style);
         }
     }
     let margin_left = initial
         .margin_left
-        .map_or(0.0, |value| value.resolve(cap.style.size, available_width));
+        .map_or(0.0, |value| value.resolve(cap_style.size, available_width));
     let margin_right = initial.margin_right.map_or_else(
         || {
             if initial.legacy_float {
                 // Legacy Kindle drop-cap recipes commonly omit an inline-end
                 // margin. Keep a small reader gap so following text does not
                 // visually collide with the enlarged glyph.
-                cap.style.size * 0.08
+                cap_style.size * 0.08
             } else {
                 0.0
             }
         },
-        |value| value.resolve(cap.style.size, available_width),
+        |value| value.resolve(cap_style.size, available_width),
     );
     let margin_top = initial
         .margin_top
-        .map_or(0.0, |value| value.resolve(cap.style.size, available_width));
+        .map_or(0.0, |value| value.resolve(cap_style.size, available_width));
     let margin_bottom = initial
         .margin_bottom
-        .map_or(0.0, |value| value.resolve(cap.style.size, available_width));
+        .map_or(0.0, |value| value.resolve(cap_style.size, available_width));
     let vertical_extra = ((margin_top.max(0.0) + margin_bottom.max(0.0))
         / normal_line_height.max(1.0))
     .ceil() as usize;
@@ -1870,7 +1921,7 @@ fn materialize_initial_letter_lines<M: TextMeasurer>(
         .min(available_width * 0.75);
     let narrow_width = (available_width - inset).max(options.body_size * 8.0);
     let breaks = super::line_breaks_with_widths(
-        &items,
+        items,
         InitialLetterLineWidths {
             narrow: narrow_width,
             full: available_width,
@@ -1901,18 +1952,18 @@ fn materialize_initial_letter_lines<M: TextMeasurer>(
     } else {
         margin_top
     };
-    cap.style.baseline_shift += first_baseline - (target_baseline + baseline_margin_top);
-    cap.style.initial_letter = None;
+    cap_style.baseline_shift += first_baseline - (target_baseline + baseline_margin_top);
+    cap_style.initial_letter = None;
     lines[0].range.start = lines[0].range.start.min(cap.range.start);
     lines[0].range.end = lines[0].range.end.max(cap.range.end);
     lines[0].runs.insert(
         0,
         RunLayout {
-            text: cap.text,
+            text: cap.text.into_owned(),
             range: cap.range,
-            style: cap.style,
+            style: cap_style,
             syntax: SyntaxKind::Plain,
-            flow_link: cap.flow_link,
+            flow_link: cap.flow_link.map(|link| items.link(link).clone()),
             generated_action: None,
             x: left + origin_indent + margin_left,
             width: cap.metrics.width,
@@ -1959,13 +2010,13 @@ fn initial_letter_sink(
         .max(1.0) as usize
 }
 
-fn layout_atomic_block<M: TextMeasurer>(
-    document: &FlowDocument,
+fn layout_atomic_block<'text, M: TextMeasurer>(
+    document: &'text FlowDocument,
     styles: &StyleSnapshot,
     unit: TextBlock,
     column_widths: &std::collections::HashMap<usize, f32>,
     measurer: &M,
-    options: &LayoutOptions,
+    context: FlowLayoutContext<'_, 'text>,
     y: f32,
 ) -> BlockLayout {
     let mut block = layout_text_block(
@@ -1976,8 +2027,8 @@ fn layout_atomic_block<M: TextMeasurer>(
         measurer,
         y,
         FlowLayoutContext {
-            options,
             force_emergency_breaking: false,
+            ..context
         },
     );
     block.kind = LayoutBlockKind::Image;
@@ -2224,14 +2275,14 @@ fn combine_presentation(outer: &Presentation, inner: &Presentation) -> Presentat
     }
 }
 
-fn layout_nested_flow<M: TextMeasurer>(
-    document: &FlowDocument,
+fn layout_nested_flow<'text, M: TextMeasurer>(
+    document: &'text FlowDocument,
     styles: &StyleSnapshot,
     root: NodeId,
     outer: &Presentation,
     note_markers: &std::collections::HashMap<NodeId, FootnotePresentation>,
     measurer: &M,
-    context: FlowLayoutContext<'_>,
+    context: FlowLayoutContext<'_, 'text>,
 ) -> Vec<BlockLayout> {
     let options = context.options;
     let mut units = text_blocks_from(document, styles, root, note_markers);
@@ -2255,7 +2306,7 @@ fn layout_nested_flow<M: TextMeasurer>(
                 layout_preformatted(document, styles, unit, &column_widths, measurer, options, y)
             }
             TextBlockKind::Atomic => {
-                layout_atomic_block(document, styles, unit, &column_widths, measurer, options, y)
+                layout_atomic_block(document, styles, unit, &column_widths, measurer, context, y)
             }
             TextBlockKind::Rule => layout_rule(styles, unit, &column_widths, measurer, options, y),
             TextBlockKind::Table => layout_nested_table_fallback(
@@ -2264,7 +2315,7 @@ fn layout_nested_flow<M: TextMeasurer>(
                 unit,
                 &column_widths,
                 measurer,
-                options,
+                context,
                 y,
             ),
         };
@@ -2298,20 +2349,20 @@ fn atomic_descendants(document: &FlowDocument, root: NodeId) -> Vec<NodeId> {
     result
 }
 
-fn collect_nested_table_fallback_items<M: TextMeasurer>(
-    document: &FlowDocument,
+fn collect_nested_table_fallback_items<'text, M: TextMeasurer>(
+    document: &'text FlowDocument,
     styles: &StyleSnapshot,
     unit: &TextBlock,
     style: &TextStyle,
     measurer: &M,
-    options: &LayoutOptions,
+    context: FlowLayoutContext<'_, 'text>,
     available: f32,
-) -> (Vec<super::LayoutItem>, Vec<PendingAtomic>) {
+) -> (super::ParagraphItems<'text>, Vec<PendingAtomic>) {
     let node = document
         .get_node(unit.node)
         .expect("nested table layout units retain valid identities");
-    let mut items = Vec::new();
-    let mut pending_atomics = Vec::new();
+    let options = context.options;
+    let (mut items, mut pending_atomics) = context.scratch.borrow_mut().take();
     let links = collect_flow_links(document, unit.node, unit.inherited_link.clone());
     let mut link_index = 0;
     if let Some(text) = document.get_text(node.text_range) {
@@ -2396,15 +2447,16 @@ fn collect_nested_table_fallback_items<M: TextMeasurer>(
     (items, pending_atomics)
 }
 
-fn layout_nested_table_fallback<M: TextMeasurer>(
-    document: &FlowDocument,
+fn layout_nested_table_fallback<'text, M: TextMeasurer>(
+    document: &'text FlowDocument,
     styles: &StyleSnapshot,
     unit: TextBlock,
     column_widths: &std::collections::HashMap<usize, f32>,
     measurer: &M,
-    options: &LayoutOptions,
+    context: FlowLayoutContext<'_, 'text>,
     y: f32,
 ) -> BlockLayout {
+    let options = context.options;
     let computed = styles
         .style_for_node(unit.node)
         .and_then(|id| styles.get_computed_style(id))
@@ -2412,12 +2464,12 @@ fn layout_nested_table_fallback<M: TextMeasurer>(
     let style = text_style(computed, options, TextBlockKind::Paragraph);
     let geometry = presentation_geometry(&unit.presentation, column_widths, measurer, options);
     let available = (options.width - geometry.content_left).max(1.0);
-    let (mut items, pending_atomics) = collect_nested_table_fallback_items(
-        document, styles, &unit, &style, measurer, options, available,
+    let (mut items, mut pending_atomics) = collect_nested_table_fallback_items(
+        document, styles, &unit, &style, measurer, context, available,
     );
     terminate(&mut items, Break::Paragraph);
     let breaks = line_breaks(&items, available);
-    let mut lines = materialize_lines(items, breaks, geometry.content_left, y, options, false);
+    let mut lines = materialize_lines(&items, breaks, geometry.content_left, y, options, false);
     if lines.is_empty() || lines.iter().all(|line| line.runs.is_empty()) {
         let metrics = measurer.measure("M", &style);
         let (height, baseline) = line_box(metrics, style.size, options.line_spacing);
@@ -2431,7 +2483,8 @@ fn layout_nested_table_fallback<M: TextMeasurer>(
         });
     }
     insert_marker(&mut lines, geometry.marker, unit.range, options);
-    let mut atomic_objects = extract_atomic_objects(&mut lines, pending_atomics);
+    let mut atomic_objects = extract_atomic_objects(&mut lines, &mut pending_atomics);
+    context.scratch.borrow_mut().recycle(items, pending_atomics);
     inherit_flow_link(
         &mut lines,
         &mut atomic_objects,
@@ -2584,14 +2637,20 @@ fn measure_item_stream(items: &[super::LayoutItem], leading: f32) -> IntrinsicWi
     }
 }
 
-fn intrinsic_flow_cell_width<M: TextMeasurer>(
-    document: &FlowDocument,
+fn intrinsic_flow_cell_width<'text, M: TextMeasurer>(
+    document: &'text FlowDocument,
     styles: &StyleSnapshot,
     cell: NodeId,
     measurer: &M,
     options: &LayoutOptions,
     note_markers: &std::collections::HashMap<NodeId, FootnotePresentation>,
+    scratch: &RefCell<ParagraphScratch<'text>>,
 ) -> IntrinsicWidths {
+    let context = FlowLayoutContext {
+        options,
+        force_emergency_breaking: false,
+        scratch,
+    };
     let units = text_blocks_from(document, styles, cell, note_markers);
     let column_widths = measure_column_widths(&units, measurer, options);
     let mut result = IntrinsicWidths::default();
@@ -2601,23 +2660,33 @@ fn intrinsic_flow_cell_width<M: TextMeasurer>(
         let marker_right = marker_right_edge(&geometry);
         let measured = match unit.kind {
             TextBlockKind::Paragraph | TextBlockKind::Heading => {
-                let (mut items, _) = collect_text_block_items(
+                let (mut items, pending) = collect_text_block_items(
                     document,
                     styles,
                     &unit,
                     measurer,
-                    options,
+                    context,
                     f32::MAX / 4.0,
-                    false,
                 );
                 terminate(&mut items, Break::Paragraph);
                 let mut measured = measure_item_stream(&items, geometry.content_left);
+                scratch.borrow_mut().recycle(items, pending);
 
-                let (mut emergency_items, _) =
-                    collect_text_block_items(document, styles, &unit, measurer, options, 1.0, true);
+                let (mut emergency_items, pending) = collect_text_block_items(
+                    document,
+                    styles,
+                    &unit,
+                    measurer,
+                    FlowLayoutContext {
+                        force_emergency_breaking: true,
+                        ..context
+                    },
+                    1.0,
+                );
                 terminate(&mut emergency_items, Break::Paragraph);
                 measured.emergency_min =
                     measure_item_stream(&emergency_items, geometry.content_left).emergency_min;
+                scratch.borrow_mut().recycle(emergency_items, pending);
                 measured
             }
             TextBlockKind::Preformatted => {
@@ -2685,23 +2754,25 @@ fn intrinsic_flow_cell_width<M: TextMeasurer>(
                     .and_then(|style| styles.get_computed_style(style))
                     .expect("style snapshots cover nested tables");
                 let style = text_style(computed, options, TextBlockKind::Paragraph);
-                let (mut items, _) = collect_nested_table_fallback_items(
+                let (mut items, pending) = collect_nested_table_fallback_items(
                     document,
                     styles,
                     &unit,
                     &style,
                     measurer,
-                    options,
+                    context,
                     f32::MAX / 4.0,
                 );
                 terminate(&mut items, Break::Paragraph);
                 let mut measured = measure_item_stream(&items, geometry.content_left);
-                let (mut emergency_items, _) = collect_nested_table_fallback_items(
-                    document, styles, &unit, &style, measurer, options, 1.0,
+                scratch.borrow_mut().recycle(items, pending);
+                let (mut emergency_items, pending) = collect_nested_table_fallback_items(
+                    document, styles, &unit, &style, measurer, context, 1.0,
                 );
                 terminate(&mut emergency_items, Break::Paragraph);
                 measured.emergency_min =
                     measure_item_stream(&emergency_items, geometry.content_left).emergency_min;
+                scratch.borrow_mut().recycle(emergency_items, pending);
                 measured
             }
             TextBlockKind::Rule => IntrinsicWidths::default(),
@@ -2742,16 +2813,17 @@ fn merge_table_quote_bars(bars: &mut Vec<super::TableQuoteBarLayout>, maximum_ga
 }
 
 #[allow(clippy::too_many_arguments)]
-fn layout_table<M: TextMeasurer>(
-    document: &FlowDocument,
+fn layout_table<'text, M: TextMeasurer>(
+    document: &'text FlowDocument,
     styles: &StyleSnapshot,
     unit: TextBlock,
     column_cache: &std::collections::HashMap<usize, f32>,
     measurer: &M,
-    options: &LayoutOptions,
+    context: FlowLayoutContext<'_, 'text>,
     y: f32,
     note_markers: &std::collections::HashMap<NodeId, FootnotePresentation>,
 ) -> BlockLayout {
+    let options = context.options;
     let node = document
         .get_node(unit.node)
         .expect("table layout units retain valid identities");
@@ -2808,8 +2880,15 @@ fn layout_table<M: TextMeasurer>(
             if start >= end {
                 continue;
             }
-            let measured =
-                intrinsic_flow_cell_width(document, styles, *cell, measurer, options, note_markers);
+            let measured = intrinsic_flow_cell_width(
+                document,
+                styles,
+                *cell,
+                measurer,
+                options,
+                note_markers,
+                context.scratch,
+            );
             let min_content = measured.min_content + horizontal_padding * 2.0;
             cell_measures.push(CellMeasure {
                 start,
@@ -2821,7 +2900,15 @@ fn layout_table<M: TextMeasurer>(
         }
     }
     let caption_measure = caption.map(|caption| {
-        intrinsic_flow_cell_width(document, styles, caption, measurer, options, note_markers)
+        intrinsic_flow_cell_width(
+            document,
+            styles,
+            caption,
+            measurer,
+            options,
+            note_markers,
+            context.scratch,
+        )
     });
     let intrinsic = compute_intrinsic_grid(&TableSizingInput {
         tracks: vec![TrackConstraint::default(); column_count],
@@ -2871,6 +2958,7 @@ fn layout_table<M: TextMeasurer>(
             FlowLayoutContext {
                 options: &caption_options,
                 force_emergency_breaking: fallback_active,
+                scratch: context.scratch,
             },
         );
         let caption_height = caption_blocks
@@ -2945,6 +3033,7 @@ fn layout_table<M: TextMeasurer>(
                 FlowLayoutContext {
                     options: &cell_options,
                     force_emergency_breaking: fallback_active,
+                    scratch: context.scratch,
                 },
             );
             let mut cell_lines = Vec::new();
@@ -3413,6 +3502,140 @@ mod tests {
         let text = builder.add_text(text).unwrap();
         builder.append(paragraph, text).unwrap();
         builder.append(parent, paragraph).unwrap();
+    }
+
+    #[test]
+    fn paragraph_scratch_reuses_capacity_without_changing_owned_output() {
+        let mut builder = FlowBuilder::new();
+        let root = builder.add_node(NodeKind::Document).unwrap();
+        append_paragraph(&mut builder, root, &"alpha beta gamma delta. ".repeat(12));
+        append_paragraph(&mut builder, root, &"other words follow here. ".repeat(12));
+        let document = builder.finish().unwrap();
+        let styles = document.resolve_styles(StyleContextKey::default());
+        let units = text_blocks_from(&document, &styles, root, &std::collections::HashMap::new());
+        let options = LayoutOptions::default();
+        let columns = std::collections::HashMap::new();
+        let scratch = RefCell::new(ParagraphScratch::default());
+        let context = FlowLayoutContext {
+            options: &options,
+            force_emergency_breaking: false,
+            scratch: &scratch,
+        };
+        let mut outputs = Vec::new();
+        let mut allocation = None;
+        for unit in units {
+            let actual = layout_text_block(
+                &document,
+                &styles,
+                unit.clone(),
+                &columns,
+                &FixedMeasurer,
+                0.0,
+                context,
+            );
+            let fresh = RefCell::new(ParagraphScratch::default());
+            let expected = layout_text_block(
+                &document,
+                &styles,
+                unit,
+                &columns,
+                &FixedMeasurer,
+                0.0,
+                FlowLayoutContext {
+                    scratch: &fresh,
+                    ..context
+                },
+            );
+            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+            let workspace = scratch.borrow();
+            assert!(workspace.items.is_empty());
+            assert!(workspace.pending_atomics.is_empty());
+            assert!(workspace.items.capacity() > 0);
+            let current = (workspace.items.as_ptr(), workspace.items.capacity());
+            if let Some(previous) = allocation {
+                assert_eq!(previous, current);
+            }
+            allocation = Some(current);
+            outputs.push(actual);
+        }
+        let before = format!("{outputs:?}");
+        drop(scratch);
+        assert_eq!(format!("{outputs:?}"), before);
+    }
+
+    #[test]
+    fn paragraph_scratch_discards_large_capacity_before_small_paragraphs() {
+        let mut builder = FlowBuilder::new();
+        let root = builder.add_node(NodeKind::Document).unwrap();
+        append_paragraph(&mut builder, root, &"word ".repeat(2048));
+        append_paragraph(&mut builder, root, "Small paragraph.");
+        let document = builder.finish().unwrap();
+        let styles = document.resolve_styles(StyleContextKey::default());
+        let mut units =
+            text_blocks_from(&document, &styles, root, &std::collections::HashMap::new())
+                .into_iter();
+        let options = LayoutOptions::default();
+        let columns = std::collections::HashMap::new();
+        let scratch = RefCell::new(ParagraphScratch::default());
+        let context = FlowLayoutContext {
+            options: &options,
+            force_emergency_breaking: false,
+            scratch: &scratch,
+        };
+        let large = layout_text_block(
+            &document,
+            &styles,
+            units.next().unwrap(),
+            &columns,
+            &FixedMeasurer,
+            0.0,
+            context,
+        );
+        assert!(large.lines.len() > 1);
+        assert_eq!(scratch.borrow().items.capacity(), 0);
+        let small = units.next().unwrap();
+        let mut allocation = None;
+        for _ in 0..20 {
+            let block = layout_text_block(
+                &document,
+                &styles,
+                small.clone(),
+                &columns,
+                &FixedMeasurer,
+                0.0,
+                context,
+            );
+            assert!(!block.lines.is_empty());
+            let workspace = scratch.borrow();
+            assert!(workspace.items.capacity_bytes() <= MAX_ITEM_SCRATCH_BYTES);
+            let current = (workspace.items.as_ptr(), workspace.items.capacity());
+            if let Some(previous) = allocation {
+                assert_eq!(previous, current);
+            }
+            allocation = Some(current);
+        }
+        assert!(
+            large
+                .lines
+                .iter()
+                .flat_map(|line| &line.runs)
+                .any(|run| run.text == "word")
+        );
+    }
+
+    #[test]
+    fn paragraph_scratch_bounds_atomic_capacity_and_runs_destructors() {
+        let mut scratch = ParagraphScratch::default();
+        let pending =
+            Vec::with_capacity(MAX_ATOMIC_SCRATCH_BYTES / std::mem::size_of::<PendingAtomic>() + 1);
+        scratch.recycle(super::super::ParagraphItems::default(), pending);
+        assert_eq!(scratch.pending_atomics.capacity(), 0);
+        let owner = Arc::new(());
+        let mut buffer = vec![Arc::clone(&owner)];
+        clear_bounded(&mut buffer, 1024);
+        assert_eq!(Arc::strong_count(&owner), 1);
+        assert!(buffer.is_empty());
+        assert!(buffer.capacity() > 0);
     }
 
     #[test]
@@ -3987,13 +4210,15 @@ mod tests {
         let layout = layout_flow_document(&document, &styles, &FixedMeasurer, &options);
         let cap = &layout.blocks[0].lines[0].runs[0];
         assert_eq!(cap.text, "“C");
-        assert!(
-            layout.blocks[0]
-                .lines
-                .iter()
-                .flat_map(|line| &line.runs)
-                .any(|run| run.text.starts_with("harlie"))
-        );
+        let remainder = layout.blocks[0]
+            .lines
+            .iter()
+            .flat_map(|line| &line.runs)
+            .find(|run| run.text.starts_with("harlie"))
+            .expect("initial-letter splitting retains the rest of the word");
+        assert_eq!(remainder.style.size, options.body_size);
+        assert!(cap.style.size > remainder.style.size);
+        assert!(remainder.style.initial_letter.is_none());
     }
 
     #[test]
@@ -5976,6 +6201,7 @@ mod tests {
                 ..LayoutOptions::default()
             },
             &std::collections::HashMap::new(),
+            &RefCell::new(ParagraphScratch::default()),
         );
 
         assert!((measured.max_content - 73.6).abs() < 0.01);
@@ -6048,6 +6274,7 @@ mod tests {
             &FixedMeasurer,
             &LayoutOptions::default(),
             &std::collections::HashMap::new(),
+            &RefCell::new(ParagraphScratch::default()),
         );
 
         assert!((measured.max_content - 300.0).abs() < 0.01);

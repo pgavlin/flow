@@ -8,7 +8,7 @@ description = "Format-neutral publications, host-driven reading sessions, and EP
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
-include = ["src/**", "examples/**", "README.md", "LICENSE"]
+include = ["src/**", "examples/**", "benches/**", "README.md", "LICENSE"]
 keywords = ["reading", "document", "epub", "typography"]
 categories = ["text-processing", "rendering"]
 
@@ -39,7 +39,19 @@ zip = { version = "7.3", optional = true, default-features = false, features = [
 name = "inspect_epub"
 required-features = ["epub"]
 
+[[bench]]
+name = "opening"
+harness = false
+required-features = ["render"]
+
+[[bench]]
+name = "memory"
+harness = false
+required-features = ["render"]
+
 [dev-dependencies]
+dhat = "0.3.3"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 flow_document = { workspace = true, features = ["render", "test-fonts"] }

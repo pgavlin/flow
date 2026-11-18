@@ -3,19 +3,23 @@
     clippy::disallowed_types,
     reason = "Build tooling owns filesystem access and process execution"
 )]
+mod perf;
+mod perf_run;
 mod web;
 
 use std::{
     env,
     ffi::OsString,
     fmt,
-    path::Path,
+    path::{Path, PathBuf},
     process::{self, Command},
 };
 
 const HELP: &str = "\
 Usage: cargo lint [--all]
        cargo build-web [--dev]
+       cargo perf [--accept]
+       cargo perf --compare <before> <after>
 
 Run from the repository root. Lint requires Clippy and rustfmt.
 
@@ -23,16 +27,23 @@ Default: formatting and all-target/all-feature Clippy.
 --all:   also check minimal core configurations, the demo reader,
          and the lint runner's own tests.
 
+perf: run timing and allocation benchmarks and report against the baseline.
+      --accept replaces the baseline with the latest complete capture, without rerunning.
+      --compare <before> <after> compares timing files or full capture directories.
+      Capture requires cargo-criterion; see docs/performance.md.
+
 build-web: assemble the browser demo (release by default; --dev for debug).
            Requires the wasm32-unknown-unknown target, WASM-capable clang/LLVM,
            and the matching wasm-bindgen CLI; see examples/reader/README.md.
 ";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Mode {
     Help,
     Lint { all: bool },
     BuildWeb { dev: bool },
+    PerfCompare { before: PathBuf, after: PathBuf },
+    Perf { accept: bool },
 }
 
 fn parse_args(args: &[String]) -> Result<Mode, Failure> {
@@ -42,11 +53,21 @@ fn parse_args(args: &[String]) -> Result<Mode, Failure> {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["perf"] => Ok(Mode::Perf { accept: false }),
+        ["perf", "--accept"] => Ok(Mode::Perf { accept: true }),
         ["lint"] => Ok(Mode::Lint { all: false }),
         ["lint", "--all"] => Ok(Mode::Lint { all: true }),
         ["build-web"] => Ok(Mode::BuildWeb { dev: false }),
         ["build-web", "--dev"] => Ok(Mode::BuildWeb { dev: true }),
-        ["lint" | "build-web", "--help" | "-h"] => Ok(Mode::Help),
+        ["lint" | "build-web" | "perf", "--help" | "-h"] => Ok(Mode::Help),
+        ["perf", "--compare", before, after]
+            if !before.starts_with('-') && !after.starts_with('-') =>
+        {
+            Ok(Mode::PerfCompare {
+                before: before.into(),
+                after: after.into(),
+            })
+        }
         _ => Err(Failure {
             code: 2,
             message: format!("invalid arguments\n\n{HELP}"),
@@ -363,6 +384,8 @@ fn run() -> Result<(), Failure> {
             eprintln!("\nLint checks passed.");
         }
         Mode::BuildWeb { dev } => web::build(&root, dev)?,
+        Mode::Perf { accept } => perf_run::run(&root, accept)?,
+        Mode::PerfCompare { before, after } => print!("{}", perf_run::compare(&before, &after)?),
         Mode::Help => unreachable!(),
     }
     Ok(())
@@ -401,7 +424,22 @@ mod tests {
             parse_args(&args(&["build-web", "--dev"])).unwrap(),
             Mode::BuildWeb { dev: true }
         );
-        for command in ["lint", "build-web"] {
+        assert_eq!(
+            parse_args(&args(&["perf", "--compare", "before.jsonl", "after.jsonl"])).unwrap(),
+            Mode::PerfCompare {
+                before: "before.jsonl".into(),
+                after: "after.jsonl".into()
+            }
+        );
+        assert_eq!(
+            parse_args(&args(&["perf"])).unwrap(),
+            Mode::Perf { accept: false }
+        );
+        assert_eq!(
+            parse_args(&args(&["perf", "--accept"])).unwrap(),
+            Mode::Perf { accept: true }
+        );
+        for command in ["lint", "build-web", "perf"] {
             for flag in ["-h", "--help"] {
                 assert_eq!(parse_args(&args(&[command, flag])).unwrap(), Mode::Help);
             }
@@ -416,6 +454,20 @@ mod tests {
             vec!["lint", "--all", "extra"],
             vec!["build-web", "--all"],
             vec!["build-web", "--dev", "extra"],
+            vec!["perf", "--accept", "extra"],
+            vec!["perf", "--filter", "chapter"],
+            vec!["perf", "--compare"],
+            vec!["perf", "--compare", "before.jsonl"],
+            vec!["perf", "--compare", "before.jsonl", "after.jsonl", "extra"],
+            vec!["perf", "--compare", "--unknown", "after.jsonl"],
+            vec![
+                "perf",
+                "--accept",
+                "--compare",
+                "before.jsonl",
+                "after.jsonl",
+            ],
+            vec!["perf-compare", "before.jsonl", "after.jsonl"],
         ] {
             assert_eq!(parse_args(&args(&values)).unwrap_err().code, 2);
         }

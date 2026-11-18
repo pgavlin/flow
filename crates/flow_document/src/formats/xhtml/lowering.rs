@@ -62,21 +62,25 @@ struct InlineWhitespace {
     pending_space: bool,
 }
 
+pub(in crate::formats) struct LoweringOptions {
+    pub resource_base: Option<String>,
+    pub identity: Option<DocumentReference>,
+    pub retention: SourceRetention,
+}
+
 pub(in crate::formats) fn lower_prepared(
     source: &str,
     prepared: PreparedXhtml,
     author_styles: &[AuthorStyle],
-    resource_base: Option<String>,
-    identity: Option<DocumentReference>,
-    retention: SourceRetention,
+    options: LoweringOptions,
     content_root: SourceNodeId,
     policy: &dyn LoweringPolicy,
 ) -> Result<ImportOutcome, LoweringError> {
     let mut builder = FlowBuilder::new();
-    builder.set_resource_base(resource_base);
+    builder.set_resource_base(options.resource_base);
     let source_id = builder.add_source(
         source.to_owned(),
-        identity,
+        options.identity,
         Some("application/xhtml+xml".into()),
     )?;
     let node_count = prepared.tree.nodes().len();
@@ -97,7 +101,7 @@ pub(in crate::formats) fn lower_prepared(
 
     let revision = SourceDigest::for_text(source);
     let document = lowerer.builder.finish()?;
-    let retained_sources = if retention == SourceRetention::Retain {
+    let retained_sources = if options.retention == SourceRetention::Retain {
         let mut retained = RetainedSourceBundle::default();
         retained.insert(revision, Arc::from(source))?;
         Some(retained)
@@ -1311,9 +1315,11 @@ mod tests {
                 diagnostics: Vec::new(),
             },
             &styles,
-            None,
-            None,
-            SourceRetention::Discard,
+            LoweringOptions {
+                resource_base: None,
+                identity: None,
+                retention: SourceRetention::Discard,
+            },
             root,
             &NoExtensions,
         )

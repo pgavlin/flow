@@ -105,7 +105,10 @@ impl ReadingSession {
         &mut self,
         key: &DocumentCacheKey,
     ) -> Result<(), ReadingSessionError> {
-        if !self.viewer.set_font_resources(self.scoped_fonts(key)) {
+        if !self
+            .viewer
+            .set_font_resources_with_context(self.scoped_fonts(key), &mut self.font_context)
+        {
             return Err(ReadingSessionError::InvalidResource);
         }
         self.viewer
@@ -269,7 +272,9 @@ impl ReadingSession {
         match (&kind, resource) {
             (ResourceKind::Font, PreparedResource::Font(resource)) => {
                 let mut probe = DocumentViewer::new("font validation", self.settings.clone());
-                if !probe.register_font_resource(resource.clone()) {
+                if !probe
+                    .set_font_resources_with_context(vec![resource.clone()], &mut self.font_context)
+                {
                     return Err(ReadingSessionError::InvalidResource);
                 }
                 let ResourceReference::Publication(reference) = reference else {

@@ -207,8 +207,10 @@ fn host_subscriber_observes_import_phases_without_timing_results() {
 
     let spans = Arc::new(Mutex::new(Vec::new()));
     tracing::subscriber::with_default(Host(spans.clone()), || {
-        let mut settings = Settings::default();
-        settings.reading_mode = ReadingMode::Paginated;
+        let settings = Settings {
+            reading_mode: ReadingMode::Paginated,
+            ..Default::default()
+        };
         let mut session = ReadingSession::new(settings);
         session.set_cache_limits(1, 0);
         let source = EpubPublication::from_bytes(epub_fixture()).unwrap();

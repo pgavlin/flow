@@ -68,7 +68,7 @@ impl Encoder {
     }
 }
 
-impl<'a> ser::Serializer for &'a mut Encoder {
+impl ser::Serializer for &mut Encoder {
     type Ok = ();
     type Error = Error;
     type SerializeSeq = Self;
@@ -241,7 +241,7 @@ compound!(SerializeSeq, serialize_element);
 compound!(SerializeTuple, serialize_element);
 compound!(SerializeTupleStruct, serialize_field);
 compound!(SerializeTupleVariant, serialize_field);
-impl<'a> SerializeMap for &'a mut Encoder {
+impl SerializeMap for &mut Encoder {
     type Ok = ();
     type Error = Error;
     fn serialize_key<T: ?Sized + Serialize>(&mut self, v: &T) -> Result<(), Error> {
@@ -254,7 +254,7 @@ impl<'a> SerializeMap for &'a mut Encoder {
         Ok(())
     }
 }
-impl<'a> SerializeStruct for &'a mut Encoder {
+impl SerializeStruct for &mut Encoder {
     type Ok = ();
     type Error = Error;
     fn serialize_field<T: ?Sized + Serialize>(
@@ -268,7 +268,7 @@ impl<'a> SerializeStruct for &'a mut Encoder {
         Ok(())
     }
 }
-impl<'a> SerializeStructVariant for &'a mut Encoder {
+impl SerializeStructVariant for &mut Encoder {
     type Ok = ();
     type Error = Error;
     fn serialize_field<T: ?Sized + Serialize>(
@@ -431,7 +431,7 @@ impl<'de> VariantAccess<'de> for Enum<'_, 'de> {
     }
 }
 
-impl<'de, 'a> de::Deserializer<'de> for &'a mut Decoder<'de> {
+impl<'de> de::Deserializer<'de> for &mut Decoder<'de> {
     type Error = Error;
     fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Error> {
         Err(Error)

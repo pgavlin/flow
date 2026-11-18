@@ -33,7 +33,10 @@ impl ReadingSession {
         {
             return Ok(false);
         }
-        self.viewer.prepare_pagination(viewport.0, viewport.1);
+        self.viewer
+            .with_font_context(&mut self.font_context, |viewer| {
+                viewer.prepare_pagination(viewport.0, viewport.1)
+            });
         if self
             .publication_pagination
             .as_ref()
@@ -124,11 +127,12 @@ impl ReadingSession {
             {
                 return None;
             }
-            let mut viewer = DocumentViewer::new("page-index dependencies", self.settings.clone());
-            if !viewer.set_font_resources(self.scoped_fonts(&scope)) {
-                return None;
-            }
-            digest.update(&viewer.persistent_layout_digest());
+            digest.update(
+                &flow_document::render::Renderer::persistent_layout_digest_for(
+                    &self.settings.rendering,
+                    &self.scoped_fonts(&scope),
+                ),
+            );
         }
         let viewport = self.viewer.viewport_size();
         digest.update(&viewport.0.to_le_bytes());
@@ -250,6 +254,46 @@ impl ReadingSession {
         Ok(())
     }
 
+    /// Drain discovery effects before expensive composition. Metadata may be
+    /// satisfied synchronously from the session cache or deferred by the host's
+    /// request limit; either way, don't compose until every dimension is known.
+    fn collect_pagination_metadata(
+        &mut self,
+        key: &DocumentCacheKey,
+    ) -> Result<(bool, bool), ReadingSessionError> {
+        let effects = self
+            .publication_pagination
+            .as_mut()
+            .and_then(|index| index.job.as_mut())
+            .expect("pagination job exists")
+            .viewer
+            .take_effects();
+        let mut requested = false;
+        for effect in effects {
+            if let ViewerEffect::RequestImageMetadata(image) = effect {
+                requested = true;
+                self.publication_pagination
+                    .as_mut()
+                    .and_then(|index| index.job.as_mut())
+                    .expect("job exists")
+                    .waiting_metadata
+                    .insert(image.url.clone());
+                self.request_image(
+                    key.clone(),
+                    image,
+                    ResourceKind::ImageMetadata,
+                    RequestPurpose::Pagination,
+                )?;
+            }
+        }
+        let ready = self
+            .publication_pagination
+            .as_ref()
+            .and_then(|index| index.job.as_ref())
+            .is_some_and(|job| job.waiting_metadata.is_empty());
+        Ok((requested, ready))
+    }
+
     pub(super) fn advance_pagination(&mut self) -> Result<(), ReadingSessionError> {
         let Some(index) = self
             .publication_pagination
@@ -315,7 +359,8 @@ impl ReadingSession {
             .expect("created or returned")
             .key
             .clone();
-        if !self.ensure_fonts(&key, RequestPurpose::Pagination, None)? {
+        let (_, metadata_ready) = self.collect_pagination_metadata(&key)?;
+        if !self.ensure_fonts(&key, RequestPurpose::Pagination, None)? || !metadata_ready {
             return Ok(());
         }
         let fonts = self.scoped_fonts(&key);
@@ -324,40 +369,23 @@ impl ReadingSession {
             .as_mut()
             .and_then(|index| index.job.as_mut())
             .expect("job exists");
-        if !job.viewer.set_font_resources(fonts) {
+        if !job
+            .viewer
+            .set_font_resources_with_context(fonts, &mut self.font_context)
+        {
             self.fail_pagination(LoadFailure::new("invalid font environment"));
             return Ok(());
         }
         let viewport = job.viewer.viewport_size();
         let count = job
             .viewer
-            .prepare_pagination(viewport.0, viewport.1)
+            .with_font_context(&mut self.font_context, |viewer| {
+                viewer.prepare_pagination(viewport.0, viewport.1)
+            })
             .and_then(|(_, total)| u32::try_from(total).ok());
-        let effects = job.viewer.take_effects();
-        let requested_metadata = effects
-            .iter()
-            .any(|effect| matches!(effect, ViewerEffect::RequestImageMetadata(_)));
-        for effect in effects {
-            if let ViewerEffect::RequestImageMetadata(image) = effect {
-                self.publication_pagination
-                    .as_mut()
-                    .and_then(|index| index.job.as_mut())
-                    .expect("job exists")
-                    .waiting_metadata
-                    .insert(image.url.clone());
-                self.request_image(
-                    key.clone(),
-                    image,
-                    ResourceKind::ImageMetadata,
-                    RequestPurpose::Pagination,
-                )?;
-            }
-        }
-        let ready = self
-            .publication_pagination
-            .as_ref()
-            .and_then(|index| index.job.as_ref())
-            .is_some_and(|job| job.waiting_metadata.is_empty());
+        // Retain the post-layout check for any resources discovered during
+        // composition. A synchronous metadata reply can invalidate this count.
+        let (requested_metadata, ready) = self.collect_pagination_metadata(&key)?;
         if !ready {
             return Ok(());
         }

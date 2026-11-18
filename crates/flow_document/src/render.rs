@@ -3,6 +3,7 @@ pub use crate::images::{ImagePixels, ImageRequest};
 use crate::pagination::{PageMap, paginate};
 pub use crate::text::{FontResource, GlyphPositioning, RasterizationOptions};
 use crate::{
+    font_context::{FontContext, FontContextOptions, FontDescription, FontHost, FontSlot},
     images::ImageCache,
     layout::{
         self, ComposedDocument, ContinuousLayout, FontFamily, FontWeight, ImageMetrics,
@@ -48,7 +49,7 @@ pub struct Renderer {
     pub(crate) settings: RenderSettings,
     layout_revision: u64,
     environment_key: [u8; 32],
-    pub(crate) fonts: RefCell<FontSystem>,
+    pub(crate) fonts: FontSlot,
     font_data: Vec<FontResource>,
     images: RefCell<ImageCache>,
 }
@@ -99,32 +100,25 @@ pub struct DocumentRegion {
     pub height: f32,
 }
 
-fn make_font_system(settings: &RenderSettings, font_data: &[FontResource]) -> FontSystem {
-    let mut fonts = FontSystem::new(
-        &settings.body_fonts,
-        &settings.code_fonts,
-        settings.regular_gamma,
-        settings.emphasized_gamma,
-        settings.font_hinting,
-        settings.glyph_positioning(),
-    );
-    fonts.set_author_fonts(settings.author_fonts);
-    for data in font_data {
-        let registered = fonts.register_font(data.clone());
-        debug_assert!(registered, "previously registered font remains valid");
+impl FontHost for Renderer {
+    fn font_slot(&mut self) -> &mut FontSlot {
+        &mut self.fonts
     }
-    fonts
 }
 
 impl Renderer {
     pub fn new(settings: impl Into<RenderSettings>) -> Self {
         let settings = settings.into();
-        let fonts = make_font_system(&settings, &[]);
+        let fonts = FontSlot::new(
+            &settings,
+            Vec::new(),
+            FontContextOptions::default().cache_bytes,
+        );
         let mut renderer = Self {
             settings,
             layout_revision: 0,
             environment_key: [0; 32],
-            fonts: RefCell::new(fonts),
+            fonts,
             font_data: Vec::new(),
             images: RefCell::new(ImageCache::default()),
         };
@@ -144,11 +138,9 @@ impl Renderer {
             || self.settings.code_fonts != settings.code_fonts
             || self.settings.author_fonts != settings.author_fonts
         {
-            self.fonts = RefCell::new(make_font_system(&settings, &self.font_data));
+            self.fonts.rebind(&settings, self.font_data.clone());
         } else {
-            self.fonts
-                .borrow_mut()
-                .set_rasterization(settings.rasterization());
+            self.fonts.set_rasterization(settings.rasterization());
         }
         self.settings = settings;
     }
@@ -164,13 +156,44 @@ impl Renderer {
         {
             return true;
         }
-        let mut fonts = make_font_system(&self.settings, &[]);
-        for resource in &resources {
-            if !fonts.register_font(resource.clone()) {
-                return false;
-            }
+        let mut fonts = FontSlot::new(&self.settings, resources.clone(), self.fonts.limit);
+        if !fonts.validate() {
+            return false;
         }
-        self.fonts = RefCell::new(fonts);
+        self.fonts.replace(fonts);
+        self.font_data = resources;
+        self.update_environment_key();
+        true
+    }
+
+    /// Run one complete operation using an explicitly borrowed font owner.
+    /// The backend returns to the context on success or unwinding.
+    pub fn with_font_context<R>(
+        &mut self,
+        context: &mut FontContext,
+        operation: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        context.scope(self, operation)
+    }
+
+    pub fn set_font_resources_with_context(
+        &mut self,
+        resources: Vec<FontResource>,
+        context: &mut FontContext,
+    ) -> bool {
+        if self
+            .font_data
+            .iter()
+            .map(FontResource::digest)
+            .eq(resources.iter().map(FontResource::digest))
+        {
+            return true;
+        }
+        let description = FontDescription::new(&self.settings, resources.clone());
+        if !context.validate(&description) {
+            return false;
+        }
+        self.fonts.rebind(&self.settings, resources.clone());
         self.font_data = resources;
         self.update_environment_key();
         true
@@ -210,11 +233,11 @@ impl Renderer {
     }
 
     pub fn register_font_resource(&mut self, resource: FontResource) -> bool {
-        if !self.fonts.borrow_mut().register_font(resource.clone()) {
+        let mut resources = self.font_data.clone();
+        resources.push(resource);
+        if !self.set_font_resources(resources) {
             return false;
         }
-        self.font_data.push(resource);
-        self.update_environment_key();
         self.layout_revision = self.layout_revision.wrapping_add(1);
         true
     }
@@ -376,10 +399,18 @@ impl Renderer {
 
     #[doc(hidden)]
     pub fn persistent_layout_digest(&self) -> [u8; 32] {
+        Self::persistent_layout_digest_for(&self.settings, &self.font_data)
+    }
+
+    #[doc(hidden)]
+    pub fn persistent_layout_digest_for(
+        settings: &RenderSettings,
+        fonts: &[FontResource],
+    ) -> [u8; 32] {
         let mut digest = blake3::Hasher::new();
         // Layout algorithm changes must invalidate persisted composition/page artifacts.
         digest.update(b"flow-layout-dependencies-v3\0");
-        let mut settings = self.settings.clone();
+        let mut settings = settings.clone();
         settings.regular_gamma = crate::settings::DEFAULT_REGULAR_GAMMA;
         settings.emphasized_gamma = crate::settings::DEFAULT_EMPHASIZED_GAMMA;
         settings.dark_mode = false;
@@ -389,7 +420,7 @@ impl Renderer {
         if let Ok(settings) = serde_json::to_vec(&settings) {
             digest.update(&settings);
         }
-        for font in &self.font_data {
+        for font in fonts {
             digest.update(&font.digest());
         }
         *digest.finalize().as_bytes()
@@ -412,7 +443,7 @@ impl Renderer {
         self.settings.emphasized_gamma = options.emphasized_gamma;
         self.settings.font_hinting = options.hinting;
         self.settings.fractional_positioning = options.positioning == GlyphPositioning::Fractional;
-        self.fonts.borrow_mut().set_rasterization(options);
+        self.fonts.set_rasterization(options);
     }
 
     pub fn render_viewport(
@@ -1394,8 +1425,9 @@ impl Renderer {
             canonical_bytes = document.text().len().as_usize() as u64,
             content_width = width as f64,
         );
+        let mut fonts = self.fonts.borrow_mut();
         let measurer = RenderMeasurer {
-            fonts: &self.fonts,
+            fonts: RefCell::new(&mut *fonts),
             images: &self.images,
             base: document.resource_base(),
         };
@@ -2710,14 +2742,14 @@ fn draw_task_checkbox<T: PaintTarget>(
 }
 
 struct RenderMeasurer<'a> {
-    fonts: &'a RefCell<FontSystem>,
+    fonts: RefCell<&'a mut FontSystem>,
     images: &'a RefCell<ImageCache>,
     base: Option<&'a str>,
 }
 
 impl TextMeasurer for RenderMeasurer<'_> {
     fn measure(&self, text: &str, style: &TextStyle) -> TextMetrics {
-        self.fonts.measure(text, style)
+        self.fonts.borrow_mut().measure(text, style)
     }
 
     fn measure_image(&self, url: &str) -> Option<ImageMetrics> {
