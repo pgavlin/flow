@@ -47,6 +47,8 @@ Tests use crate-local fixtures and explicit fonts, not installed system fonts
 or a private EPUB corpus. Rendering tests are exercised on native hosts;
 WebAssembly and Android runtime validation require separate host harnesses.
 
+Release setup and commands are in [Publishing](docs/publishing.md).
+
 ## License
 
 Engine code is MIT licensed. Test fonts have their own licenses; see

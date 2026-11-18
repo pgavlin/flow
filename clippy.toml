@@ -21,7 +21,6 @@ disallowed-methods = [
     { path = "std::fs::canonicalize", reason = "Filesystem acquisition and operations belong to the host" },
     { path = "std::fs::set_permissions", reason = "Filesystem acquisition and operations belong to the host" },
     { path = "std::fs::exists", reason = "Filesystem acquisition and operations belong to the host" },
-    { path = "std::fs::try_exists", reason = "Filesystem acquisition and operations belong to the host" },
     { path = "std::fs::read_link", reason = "Filesystem acquisition and operations belong to the host" },
     { path = "std::fs::File::open", reason = "Filesystem acquisition and operations belong to the host" },
     { path = "std::fs::File::create", reason = "Filesystem acquisition and operations belong to the host" },

@@ -2,10 +2,13 @@
 name = "flow_publication"
 version.workspace = true
 edition.workspace = true
-description = "Portable publication containers and reading sessions for flow_document"
+rust-version.workspace = true
+publish.workspace = true
+description = "Format-neutral publications, host-driven reading sessions, and EPUB import"
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
+include = ["src/**", "examples/**", "README.md", "LICENSE"]
 keywords = ["reading", "document", "epub", "typography"]
 categories = ["text-processing", "rendering"]
 

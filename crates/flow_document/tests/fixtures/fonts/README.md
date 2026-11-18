@@ -15,9 +15,9 @@ Tests and the `test-fonts` feature register these fixtures explicitly.
 
 The recorded sources are the practicaltypography.com Charter 210112
 distribution and Google Fonts for Fira Code and Noto.
-The OFL notices here come from the corresponding Google Fonts family
-directories. Exact font revisions and matching copyright notices still need
-verification before public distribution.
+The notices match the copyright and license records embedded in the font files.
+Embedded versions: Charter 2.000; Fira Code 5.002; Noto Emoji 3.002;
+Noto Sans 2.015; Arabic 2.012; Hebrew 3.001; Devanagari 2.007; JP 2.004-H2.
 
 ## Bitstream Charter notice
 

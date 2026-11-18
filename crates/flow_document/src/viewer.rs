@@ -207,7 +207,6 @@ impl ViewerSession {
 ///     viewer.renderer = renderer;
 /// }
 /// ```
-
 pub struct DocumentViewer {
     document_name: String,
     document: Option<FlowDocument>,

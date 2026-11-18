@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: Validate tag, versions, and registry dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          version="${GITHUB_REF_NAME#v}"
+          cargo metadata --locked --no-deps --format-version 1 > metadata.json
+          jq -e --arg version "$version" '
+            (.packages | map(.name) | sort) == ["flow_cache", "flow_document", "flow_publication"]
+            and all(.packages[]; .version == $version and .publish == ["crates-io"])
+            and all(.packages[].dependencies[] | select(.path != null); .req == ("^" + $version))
+          ' metadata.json
+
+      - name: Verify release environment protection
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/environments/crates-io" > environment.json
+          jq -e '.deployment_branch_policy.custom_branch_policies == true and
+            any(.protection_rules[]; .type == "required_reviewers" and (.reviewers | length) > 0)' environment.json
+          gh api "repos/$GITHUB_REPOSITORY/environments/crates-io/deployment-branch-policies" |
+            jq -e '(.branch_policies | length) == 1 and
+              all(.branch_policies[]; .type == "tag" and .name == "v*")'
+
+  checks:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: checks
+    runs-on: ubuntu-latest
+    environment: crates-io
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: Select unpublished crates and verify any completed uploads
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          commit=$(git rev-parse HEAD)
+          packages=()
+          for crate in flow_cache flow_document flow_publication; do
+            status=$(curl --silent --show-error --location --retry 3 \
+              --user-agent 'flow-release (https://github.com/pgavlin/flow)' \
+              --output "$RUNNER_TEMP/$crate.json" --write-out '%{http_code}' \
+              "https://crates.io/api/v1/crates/$crate/$version")
+            case "$status" in
+              404) packages+=(--package "$crate") ;;
+              200)
+                # Support bootstrap and partial-release retries, but never
+                # silently accept an existing version from a different commit.
+                curl --fail --silent --show-error --location --retry 3 \
+                  "https://static.crates.io/crates/$crate/$crate-$version.crate" \
+                  --output "$RUNNER_TEMP/$crate.crate"
+                tar -xOf "$RUNNER_TEMP/$crate.crate" "$crate-$version/.cargo_vcs_info.json" |
+                  jq -e --arg sha "$commit" --arg path "crates/$crate" \
+                    '.git.sha1 == $sha and (.git.dirty // false) == false and .path_in_vcs == $path'
+                ;;
+              *) echo "crates.io returned HTTP $status for $crate@$version" >&2; exit 1 ;;
+            esac
+          done
+          echo "packages=${packages[*]}" >> "$GITHUB_OUTPUT"
+      - name: Authenticate to crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1
+      - name: Publish in dependency order
+        if: steps.registry.outputs.packages != ''
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          PACKAGES: ${{ steps.registry.outputs.packages }}
+        run: |
+          set -euo pipefail
+          read -r -a packages <<< "$PACKAGES"
+          cargo publish --locked --all-features "${packages[@]}"
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "GitHub release already exists."
+          else
+            options=()
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then options+=(--prerelease); fi
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes "${options[@]}"
+          fi

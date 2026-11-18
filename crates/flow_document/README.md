@@ -30,3 +30,6 @@ Default features are empty.
 Hosts register fonts explicitly and may supply ordered family preferences;
 default preference lists are empty. On WebAssembly, hosts also register
 Tree-sitter language modules explicitly.
+
+Engine code is MIT licensed. Bundled test fonts use the Bitstream Charter and
+SIL Open Font licenses; see the [font notices](https://github.com/pgavlin/flow/blob/main/crates/flow_document/tests/fixtures/fonts/README.md).

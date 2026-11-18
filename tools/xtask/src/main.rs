@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "Build tooling owns filesystem access and process execution"
+)]
 mod web;
 
 use std::{

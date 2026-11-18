@@ -2,10 +2,13 @@
 name = "flow_document"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 description = "Portable semantic document, reflow, pagination, and rendering engine"
-license.workspace = true
+license = "MIT AND Bitstream-Charter AND OFL-1.1"
 repository.workspace = true
 readme = "README.md"
+include = ["src/**", "examples/**", "tests/fixtures/**", "README.md", "LICENSE"]
 keywords = ["reading", "document", "epub", "typography"]
 categories = ["text-processing", "rendering"]
 

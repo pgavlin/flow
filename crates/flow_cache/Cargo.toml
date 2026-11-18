@@ -2,10 +2,16 @@
 name = "flow_cache"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 description = "Shared transport primitives for flow engine cache artifacts"
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
+include = ["src/**", "README.md", "LICENSE"]
+
+keywords = ["cache", "serialization"]
+categories = ["caching", "encoding"]
 
 [lints]
 workspace = true
