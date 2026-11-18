@@ -366,7 +366,6 @@ fn publication_image_pagination_loads_documents_linearly() {
             session.prepare_publication_pagination().unwrap();
             drain(&mut session, images, &mut counts);
             assert!(session.publication_pagination_complete());
-            eprintln!("images={images}, chapters={count}: {counts:?}");
             assert!(
                 counts.iter().sum::<usize>() <= 2 * count,
                 "excessive document loads: {counts:?}"

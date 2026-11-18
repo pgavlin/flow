@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "flow_cache"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "serde",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "flow_document"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "flow_publication"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
