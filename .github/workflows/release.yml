@@ -23,7 +23,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
       - name: Validate tag, versions, and registry dependencies
         shell: bash
         run: |
@@ -67,7 +68,8 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
       - name: Select unpublished crates and verify any completed uploads
         id: registry
         shell: bash

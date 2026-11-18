@@ -3,7 +3,7 @@
 use super::{Publication, PublicationKey, PublicationRevision};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use thiserror::Error;
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -41,11 +41,7 @@ impl PublicationRegistry {
             return Ok(*handle);
         }
         let handle = PublicationHandle(
-            NEXT_HANDLE
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                    value.checked_add(1)
-                })
-                .map_err(|_| RegistryError::Exhausted)?,
+            crate::runtime_id::allocate(&NEXT_HANDLE).ok_or(RegistryError::Exhausted)?,
         );
         self.latest.insert(publication.key().clone(), handle);
         self.revisions.insert(identity, handle);

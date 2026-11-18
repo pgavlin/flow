@@ -17,7 +17,7 @@ features = ["render", "epub", "serde"]
 
 [features]
 default = []
-epub = ["dep:quick-xml", "dep:url", "dep:zip"]
+epub = ["dep:quick-xml", "dep:zip"]
 render = ["flow_document/render", "dep:anyhow"]
 serde = ["flow_document/serde"]
 telemetry = ["flow_document/telemetry"]
@@ -33,7 +33,6 @@ blake3 = "1"
 quick-xml = { version = "0.41", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-url = { version = "2.5", optional = true }
 zip = { version = "7.3", optional = true, default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [[example]]

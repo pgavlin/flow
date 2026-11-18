@@ -24,9 +24,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          components: clippy, rustfmt
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo lint --all
 
@@ -37,9 +36,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          components: rustfmt
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo fmt --all -- --check
       - name: Build minimal workspace without warnings
@@ -54,13 +52,6 @@ jobs:
       - run: cargo test --locked -p flow_publication --no-default-features
       - run: cargo check --locked --workspace --all-targets --all-features
       - run: cargo test --locked --workspace --all-features
-      - name: Check shared cache dependency boundary
-        run: |
-          cargo tree --locked -p flow_cache --edges normal > /tmp/shared-cache-tree.txt
-          if grep -Eq ' (flow_document|flow_publication|fontique|harfrust|skrifa|swash|image|tracing) v' /tmp/shared-cache-tree.txt; then
-            echo "Shared cache transport unexpectedly depends on an engine layer"
-            exit 1
-          fi
       - run: cargo doc --locked --workspace --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
@@ -69,7 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Verify all packaged crates together
         run: cargo package --locked --workspace --all-features
@@ -83,13 +75,15 @@ jobs:
 
   msrv:
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: 1.94.0
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: cargo check --locked --workspace --all-targets --all-features
+      - run: cargo +1.94.0 check --locked --workspace --all-targets --all-features
 
   reader:
     strategy:
@@ -98,9 +92,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          components: clippy, rustfmt
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: examples/reader -> target
@@ -112,9 +105,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: examples/reader -> target

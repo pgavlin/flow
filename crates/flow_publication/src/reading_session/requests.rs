@@ -2,15 +2,11 @@
 use super::*;
 use flow_document::model::flow::Destination;
 use flow_document::viewer::{ImagePixels, ImageRequest, ViewerEffect};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 fn next_id() -> Result<u64, ReadingSessionError> {
-    NEXT_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            value.checked_add(1)
-        })
-        .map_err(|_| ReadingSessionError::Exhausted)
+    crate::runtime_id::allocate(&NEXT_ID).ok_or(ReadingSessionError::Exhausted)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

@@ -61,10 +61,9 @@ unicode-bidi = "0.3.18"
 unicode-linebreak = "0.1.5"
 unicode-segmentation = "1.12"
 unicode-normalization = { version = "0.1", optional = true }
-url = "2.5"
 
 anyhow = { version = "1", optional = true }
-fontique = { version = "0.11.1", optional = true }
+fontique = { version = "0.11.1", optional = true, default-features = false, features = ["std"] }
 harfrust = { version = "0.13.3", optional = true }
 hashbrown = { version = "0.16", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["gif", "jpeg", "png", "webp"] }

@@ -74,6 +74,7 @@ struct Check {
     label: &'static str,
     tool: Tool,
     args: Vec<OsString>,
+    forbidden_output: &'static [&'static str],
 }
 
 impl Check {
@@ -82,17 +83,58 @@ impl Check {
             label,
             tool,
             args: args.iter().map(OsString::from).collect(),
+            forbidden_output: &[],
         }
+    }
+
+    fn reject_output(mut self, prefixes: &'static [&'static str]) -> Self {
+        self.forbidden_output = prefixes;
+        self
+    }
+
+    fn validate_output(&self, output: &str) -> Result<(), Failure> {
+        let violations: Vec<_> = output
+            .lines()
+            .filter(|line| {
+                self.forbidden_output
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+            })
+            .collect();
+        if violations.is_empty() {
+            return Ok(());
+        }
+        Err(Failure {
+            code: 1,
+            message: format!(
+                "{} failed: forbidden dependencies/features:\n{}",
+                self.label,
+                violations.join("\n")
+            ),
+        })
     }
 
     fn run(&self, root: &Path) -> Result<(), Failure> {
         eprintln!("\n==> {}", self.label);
-        run_command(
-            Command::new(self.tool.executable())
-                .current_dir(root)
-                .args(&self.args),
-            self.label,
-        )
+        let mut command = Command::new(self.tool.executable());
+        command.current_dir(root).args(&self.args);
+        if self.forbidden_output.is_empty() {
+            return run_command(&mut command, self.label);
+        }
+        let output = command
+            .stderr(process::Stdio::inherit())
+            .output()
+            .map_err(|error| Failure {
+                code: 1,
+                message: format!("could not run {}: {error}", self.label),
+            })?;
+        if !output.status.success() {
+            return Err(Failure {
+                code: output.status.code().unwrap_or(1),
+                message: format!("{} failed ({})", self.label, output.status),
+            });
+        }
+        self.validate_output(&String::from_utf8_lossy(&output.stdout))
     }
 }
 
@@ -240,6 +282,51 @@ fn checks(all: bool) -> Vec<Check> {
                 ],
             ),
             Check::new(
+                "Shared cache dependency boundary",
+                Cargo,
+                &[
+                    "tree",
+                    "--locked",
+                    "--color",
+                    "never",
+                    "-p",
+                    "flow_cache",
+                    "--edges",
+                    "normal",
+                    "--prefix",
+                    "none",
+                ],
+            )
+            .reject_output(&[
+                "flow_document v",
+                "flow_publication v",
+                "fontique v",
+                "harfrust v",
+                "skrifa v",
+                "swash v",
+                "image v",
+                "tracing v",
+            ]),
+            Check::new(
+                "Linux font dependency boundary",
+                Cargo,
+                &[
+                    "tree",
+                    "--locked",
+                    "--color",
+                    "never",
+                    "--workspace",
+                    "--all-features",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
+                    "--edges",
+                    "features",
+                    "--prefix",
+                    "none",
+                ],
+            )
+            .reject_output(&["fontique feature \"system\"", "yeslogic-fontconfig-sys v"]),
+            Check::new(
                 "Lint runner tests",
                 Cargo,
                 &[
@@ -339,12 +426,53 @@ mod tests {
         let basic = checks(false);
         let full = checks(true);
         assert_eq!(basic.len(), 5);
-        assert_eq!(full.len(), 11);
+        assert_eq!(full.len(), 13);
         for (basic, full) in basic.iter().zip(&full) {
             assert_eq!(basic.label, full.label);
             assert_eq!(basic.tool, full.tool);
             assert_eq!(basic.args, full.args);
+            assert_eq!(basic.forbidden_output, full.forbidden_output);
         }
+    }
+
+    #[test]
+    fn dependency_checks_reject_forbidden_nodes_without_matching_similar_names() {
+        let plan = checks(true);
+        let cache = plan
+            .iter()
+            .find(|check| check.label == "Shared cache dependency boundary")
+            .unwrap();
+        cache
+            .validate_output("flow_cache v0.1.0\nserde v1.0.0\nimageproc v0.1.0\n")
+            .unwrap();
+        for node in ["image v0.25.0", "fontique v0.11.1", "flow_document v0.1.0"] {
+            assert!(
+                cache
+                    .validate_output(node)
+                    .unwrap_err()
+                    .message
+                    .contains(node)
+            );
+        }
+        let fonts = plan
+            .iter()
+            .find(|check| check.label == "Linux font dependency boundary")
+            .unwrap();
+        fonts
+            .validate_output("fontique feature \"std\"\nfontique v0.11.1\n")
+            .unwrap();
+        for node in [
+            "fontique feature \"system\"",
+            "yeslogic-fontconfig-sys v6.0.1",
+        ] {
+            assert!(fonts.validate_output(node).is_err());
+        }
+        assert!(
+            fonts
+                .args
+                .iter()
+                .any(|arg| arg == "x86_64-unknown-linux-gnu")
+        );
     }
 
     #[test]

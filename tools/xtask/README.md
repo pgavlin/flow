@@ -9,7 +9,8 @@ cargo lint --all
 cargo lint --help
 ```
 
-The Cargo aliases run a dependency-free Rust build/lint tool.
+The Cargo aliases run a dependency-free Rust build/lint tool. Local builds, CI,
+and releases use the compiler pinned in `rust-toolchain.toml`.
 
 ## Browser demo build
 
@@ -36,6 +37,8 @@ The default local loop runs:
 
 - A core document build with compiler warnings denied.
 - Core document and publication Clippy configurations.
+- Shared-cache dependency isolation and Linux font-feature checks. The Linux
+  dependency graph is checked on every host without cross-compiling.
 - Clippy and window-free tests for the isolated demo reader host.
 - The runner's own unit tests.
 
