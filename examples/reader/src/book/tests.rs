@@ -320,15 +320,28 @@ fn adjacent_resources_cannot_escape_the_selected_directory() {
     std::fs::write(&document, "# Hello").unwrap();
     std::fs::write(root.join("image.png"), b"image").unwrap();
     std::fs::write(directory.path().join("secret"), b"secret").unwrap();
+    let sibling = directory.path().join("book-other");
+    std::fs::create_dir(&sibling).unwrap();
+    std::fs::write(sibling.join("image.png"), b"sibling").unwrap();
     let document = document.canonicalize().unwrap();
-    assert!(
-        adjacent_path(&document, "image.png")
-            .unwrap()
-            .starts_with(&root)
+    let image = root.join("image.png").canonicalize().unwrap();
+    for reference in [
+        "image.png",
+        "./image.png",
+        "child/../image.png",
+        "image.png#fragment",
+    ] {
+        assert_eq!(adjacent_path(&document, reference).unwrap(), image);
+    }
+    let absolute_image = Url::from_file_path(&image).unwrap();
+    assert_eq!(
+        adjacent_path(&document, absolute_image.as_str()).unwrap(),
+        image
     );
     for reference in [
         "../secret",
         "%2e%2e/secret",
+        "../book-other/image.png",
         "https://example.test/image.png",
         "//example.test/image.png",
     ] {

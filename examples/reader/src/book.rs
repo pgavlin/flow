@@ -333,8 +333,14 @@ fn adjacent_path(document: &std::path::Path, reference: &str) -> Result<std::pat
     let candidate = url
         .to_file_path()
         .map_err(|_| anyhow::anyhow!("Invalid local resource"))?;
+    // File URLs normalize Windows verbatim prefixes to ordinary drive/UNC paths.
+    // Compare both lexical paths in the URL representation, then canonical
+    // filesystem paths below so symlinks cannot escape the selected directory.
+    let lexical_root = base
+        .to_file_path()
+        .map_err(|_| anyhow::anyhow!("Invalid local directory"))?;
     ensure!(
-        candidate.starts_with(root),
+        candidate.starts_with(&lexical_root),
         "Resource escapes the selected document directory"
     );
     let path = candidate.canonicalize()?;
