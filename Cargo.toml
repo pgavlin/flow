@@ -13,7 +13,7 @@ print_stderr = "deny"
 dbg_macro = "deny"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 publish = ["crates-io"]
@@ -21,5 +21,5 @@ license = "MIT"
 repository = "https://github.com/pgavlin/flow"
 
 [workspace.dependencies]
-flow_cache = { version = "0.1.1", path = "crates/flow_cache" }
-flow_document = { version = "0.1.1", path = "crates/flow_document", default-features = false }
+flow_cache = { version = "0.2.0", path = "crates/flow_cache" }
+flow_document = { version = "0.2.0", path = "crates/flow_document", default-features = false }
