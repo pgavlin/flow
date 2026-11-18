@@ -27,6 +27,8 @@ pub mod font_context;
 #[doc(hidden)]
 pub mod images;
 #[cfg(feature = "render")]
+pub mod overflow;
+#[cfg(feature = "render")]
 pub mod pixels;
 #[cfg(feature = "render")]
 pub mod render;

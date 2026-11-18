@@ -19,7 +19,11 @@ Linux's picker needs an XDG desktop portal backend or Zenity at runtime.
 - Ctrl/Cmd+O: native picker; dropping a file also opens it.
 - P: toggle continuous/paginated reading (also a browser toolbar button).
 - Wheel, Space, Page Up/Down, Up/Down: scroll, or turn pages in paginated mode.
-- Left/Right: previous/next page in paginated mode; otherwise sequential document.
+- Tab/Shift+Tab: keyboard focus through document targets, including visible wide
+  tables and code blocks. Escape clears focus; pointer input does not acquire it.
+- Left/Right: scroll a focused wide-content viewport (including at its limits);
+  otherwise previous/next page in paginated mode or sequential document.
+- Horizontal wheel/trackpad input scrolls the hovered wide-content viewport.
 - Shift+Space: scroll/turn backward.
 - Alt+Left or Backspace: back after following a link.
 - Ctrl/Cmd +/−: font size.
@@ -48,7 +52,9 @@ python3 -m http.server 8080 --directory examples/reader/target/web
 
 Open <http://localhost:8080>. Use Open, Back, previous/next, and text-size buttons;
 the focused canvas also accepts the desktop keys. Touch drag scrolls in continuous
-mode; a horizontal or vertical swipe turns one page in paginated mode. Tap follows
+mode; a horizontal or vertical swipe turns one page in paginated mode. Horizontal
+swipes starting in a wide table/code block scroll that content instead, even at
+its limits. Split fragments share their horizontal offset across pages. Tap follows
 links. Only selected file bytes enter WASM—documents are never uploaded to a
 server. Serve over HTTP(S), not `file:`. No cross-origin-isolation headers needed.
 
@@ -84,6 +90,11 @@ cargo test --locked --manifest-path examples/reader/Cargo.toml
 cargo clippy --locked --manifest-path examples/reader/Cargo.toml --all-targets
 python3 examples/reader/tests/make_epub.py /tmp/flow-demo.epub
 ```
+
+Wide-content fixtures live in
+[`crates/flow_document/tests/fixtures/horizontal-overflow`](../../crates/flow_document/tests/fixtures/horizontal-overflow).
+Open them at a narrow width to exercise tables, authored code lines, nested
+content, shared page-fragment offsets, and keyboard/wheel/touch interactions.
 
 The synthetic EPUB exercises links, images and scrolling/pagination. Native
 host tests also exercise EPUB fonts, back/navigation, bidirectional chapter-boundary

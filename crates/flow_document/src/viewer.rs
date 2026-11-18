@@ -6,6 +6,7 @@
 
 pub use crate::render::{FontResource, ImagePixels, ImageRequest};
 
+use crate::overflow::{HorizontalOverflowPlacement, HorizontalOverflowState, OverflowOwner};
 use crate::{
     layout::{ComposedDocument, ContinuousLayout, GeneratedAction},
     model::{
@@ -27,6 +28,20 @@ use crate::{
     },
 };
 use std::{sync::Arc, time::Duration};
+
+/// Dominant direction, fixed after the viewer's pan threshold is crossed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PanAxis {
+    Horizontal,
+    Vertical,
+}
+
+struct OverflowPan {
+    origin: (f32, f32),
+    previous: (f32, f32),
+    owner: Option<OverflowOwner>,
+    horizontal: Option<bool>,
+}
 
 const POINTER_DRAG_THRESHOLD: f32 = 5.0;
 const LINK_ACTIVATION_DELAY: Duration = Duration::from_millis(500);
@@ -174,6 +189,7 @@ pub struct ViewerSession {
     selection_recovery: Option<StableFlowSelection>,
     visual_selection: bool,
     selection_preferred_x: Option<f32>,
+    overflow: HorizontalOverflowState,
 }
 
 impl ViewerSession {
@@ -250,6 +266,9 @@ pub struct DocumentViewer {
     selection_drag: Option<SelectionDrag>,
     pending_link_activation: Option<PendingLinkActivation>,
     last_selection_page_turn: Option<Duration>,
+    overflow: HorizontalOverflowState,
+    overflow_focus_fragment: Option<(ReadingMode, usize)>,
+    overflow_pan: Option<OverflowPan>,
     effects: Vec<ViewerEffect>,
     revisions: ViewerRevisions,
 }
@@ -267,6 +286,8 @@ impl DocumentViewer {
         let dark_mode = settings.dark_mode;
         let reading_mode = settings.reading_mode;
         let page_margin = settings.theme.page_margin;
+        let mut renderer = Renderer::new(settings);
+        renderer.enable_interactive_overflow();
         Self {
             document_name: document_name.into(),
             document: None,
@@ -274,7 +295,7 @@ impl DocumentViewer {
             font_size_points,
             max_width_points,
             dark_mode,
-            renderer: Renderer::new(settings),
+            renderer,
             pointer_position: None,
             page_wheel_accumulator: 0.0,
             hovered_link: None,
@@ -310,6 +331,9 @@ impl DocumentViewer {
             selection_drag: None,
             pending_link_activation: None,
             last_selection_page_turn: None,
+            overflow: HorizontalOverflowState::default(),
+            overflow_focus_fragment: None,
+            overflow_pan: None,
             effects: Vec::new(),
             revisions: ViewerRevisions::default(),
         }
@@ -394,6 +418,7 @@ impl DocumentViewer {
     }
 
     pub fn cancel_pending_interaction(&mut self) {
+        self.overflow_pan = None;
         self.pending_link_activation = None;
     }
 
@@ -479,6 +504,7 @@ impl DocumentViewer {
             Action::CopySelection => self.reduce_copy_selection(),
         };
 
+        self.validate_overflow_focus();
         let after_position = (
             self.reading_mode,
             self.scroll_y.to_bits(),
@@ -614,6 +640,9 @@ impl DocumentViewer {
     /// Replaces the displayed document while recovering a selection from its
     /// logical-text context where possible.
     pub fn replace_document(&mut self, result: Result<FlowDocument, String>) {
+        self.overflow = HorizontalOverflowState::default();
+        self.overflow_focus_fragment = None;
+        self.overflow_pan = None;
         self.pending_link_activation = None;
         self.capture_anchor();
         let recovery = self
@@ -746,6 +775,7 @@ impl DocumentViewer {
             selection_recovery: self.selection_recovery.take(),
             visual_selection: self.visual_selection,
             selection_preferred_x: self.selection_preferred_x,
+            overflow: std::mem::take(&mut self.overflow),
         }
     }
 
@@ -777,6 +807,10 @@ impl DocumentViewer {
         self.selection_recovery = session.selection_recovery;
         self.visual_selection = session.visual_selection;
         self.selection_preferred_x = session.selection_preferred_x;
+        self.overflow = session.overflow;
+        self.overflow.focused = None;
+        self.overflow_focus_fragment = None;
+        self.overflow_pan = None;
     }
 
     fn allocate_semantic_key(&mut self) -> SemanticKey {
@@ -793,6 +827,9 @@ impl DocumentViewer {
     }
 
     fn reset_session_state(&mut self) {
+        self.overflow = HorizontalOverflowState::default();
+        self.overflow_focus_fragment = None;
+        self.overflow_pan = None;
         self.scroll_y = 0.0;
         self.current_page = 0;
         self.page_anchor = Some(0);
@@ -1163,6 +1200,20 @@ impl DocumentViewer {
                 .insert_composition(composition_key, Arc::clone(&composed));
             composed
         };
+        let placements: Vec<_> = composed
+            .blocks
+            .iter()
+            .filter_map(|b| crate::overflow::block_placement(&b.layout, composed.width))
+            .collect();
+        self.overflow.offsets.retain(|owner, offset| {
+            if let Some(p) = placements.iter().find(|p| p.owner == *owner) {
+                *offset = offset.clamp(0.0, p.maximum_offset());
+                true
+            } else {
+                false
+            }
+        });
+        self.overflow_pan = None;
         self.composed = composed;
         self.composition_key = Some(composition_key);
         // Retain semantic navigation, but discard coordinates from a previous
@@ -1315,6 +1366,191 @@ impl DocumentViewer {
         ActionResult { value: true }
     }
 
+    /// Visible overflow viewports in viewer (logical pixel) coordinates.
+    pub fn visible_horizontal_overflows(&self) -> Vec<HorizontalOverflowPlacement> {
+        let margin = self.renderer.settings().theme.page_margin;
+        let (mut placements, dy) = if self.reading_mode == ReadingMode::Paginated {
+            (
+                self.pages
+                    .horizontal_overflows(&self.composed, self.current_page),
+                margin,
+            )
+        } else {
+            (self.layout.horizontal_overflows(), margin - self.scroll_y)
+        };
+        let width = if self.reading_mode == ReadingMode::Paginated {
+            self.pages.width
+        } else {
+            self.layout.width
+        };
+        let dx = ((self.size.0 as f32 - width) / 2.0).max(margin);
+        for placement in &mut placements {
+            placement.viewport.x += dx;
+            placement.viewport.y += dy;
+            placement.clip = placement.viewport;
+        }
+        placements.retain(|p| {
+            p.viewport.y < self.size.1 as f32 && p.viewport.y + p.viewport.height > 0.0
+        });
+        placements
+    }
+
+    pub fn horizontal_offset(&self, placement: HorizontalOverflowPlacement) -> f32 {
+        self.overflow.offset(placement)
+    }
+
+    fn overflow_at(&self, x: f32, y: f32) -> Option<HorizontalOverflowPlacement> {
+        self.visible_horizontal_overflows()
+            .into_iter()
+            .find(|p| p.clip.contains(x, y))
+    }
+
+    fn overflow_pointer_is_clipped(&self, x: f32, y: f32) -> bool {
+        self.visible_horizontal_overflows().iter().any(|p| {
+            y >= p.clip.y
+                && y < p.clip.y + p.clip.height
+                && (x < p.clip.x || x >= p.clip.x + p.clip.width)
+        })
+    }
+
+    fn overflow_offset_at(&self, x: f32, y: f32) -> f32 {
+        self.overflow_at(x, y)
+            .map_or(0.0, |p| self.overflow.offset(p))
+    }
+
+    fn validate_overflow_focus(&mut self) {
+        let visible = self.visible_horizontal_overflows();
+        if self.overflow_focus_fragment != Some((self.reading_mode, self.current_page))
+            || !visible
+                .iter()
+                .any(|p| Some(p.owner) == self.overflow.focused)
+        {
+            if let Some(owner) = self.overflow.focused.take() {
+                if self
+                    .focused
+                    .as_ref()
+                    .and_then(|id| self.navigation.target(id))
+                    .and_then(|target| target.flow_node())
+                    == Some(owner)
+                {
+                    self.focused = None;
+                }
+                self.request_redraw();
+            }
+            self.overflow_focus_fragment = None;
+        }
+    }
+
+    /// Escape clears keyboard focus. Pointer and pan input never acquire it.
+    pub fn clear_focus(&mut self) {
+        self.focused = None;
+        self.overflow.focused = None;
+        self.overflow_focus_fragment = None;
+        self.request_redraw();
+    }
+
+    /// Scroll a visible owner without changing focus (e.g. an accessibility
+    /// scroll action). Returns true even when already at the requested limit.
+    pub fn scroll_horizontal(&mut self, owner: OverflowOwner, delta: f32) -> bool {
+        let Some(placement) = self
+            .visible_horizontal_overflows()
+            .into_iter()
+            .find(|p| p.owner == owner)
+        else {
+            return false;
+        };
+        self.overflow.scroll(placement, delta);
+        self.refresh_hover();
+        self.request_redraw();
+        true
+    }
+
+    /// Returns true when a focused viewport consumes the key, even at a limit.
+    pub fn scroll_focused_horizontal(&mut self, delta: f32) -> bool {
+        self.validate_overflow_focus();
+        let placement = self
+            .visible_horizontal_overflows()
+            .into_iter()
+            .find(|p| Some(p.owner) == self.overflow.focused);
+        let Some(placement) = placement else {
+            return false;
+        };
+        self.overflow.scroll(placement, delta);
+        self.refresh_hover();
+        self.request_redraw();
+        true
+    }
+
+    /// Returns true when horizontal wheel input belongs to the hovered viewport.
+    pub fn wheel_horizontal(&mut self, delta: f32) -> bool {
+        let Some(placement) = self
+            .pointer_position
+            .and_then(|(x, y)| self.overflow_at(x, y))
+        else {
+            return false;
+        };
+        self.overflow.scroll(placement, delta);
+        self.refresh_hover();
+        self.request_redraw();
+        true
+    }
+
+    /// Begin a touch/pan gesture, independent of mouse text selection.
+    pub fn begin_pan(&mut self, x: f32, y: f32) {
+        self.overflow_pan = Some(OverflowPan {
+            origin: (x, y),
+            previous: (x, y),
+            horizontal: None,
+            owner: self.overflow_at(x, y).map(|p| p.owner),
+        });
+    }
+
+    /// Returns true if overflow owns this gesture. Ownership is retained at
+    /// limits and after leaving the viewport; hosts must not turn pages then.
+    /// Vertical pans retain the host's existing document-navigation behavior.
+    pub fn pan_to(&mut self, x: f32, y: f32) -> bool {
+        let Some(mut pan) = self.overflow_pan.take() else {
+            return false;
+        };
+        let dx = x - pan.origin.0;
+        let dy = y - pan.origin.1;
+        if pan.horizontal.is_none() && dx.hypot(dy) >= POINTER_DRAG_THRESHOLD {
+            pan.horizontal = Some(dx.abs() > dy.abs());
+        }
+        let captured = pan.horizontal == Some(true) && pan.owner.is_some();
+        if captured
+            && let Some(placement) = self
+                .visible_horizontal_overflows()
+                .into_iter()
+                .find(|p| Some(p.owner) == pan.owner)
+        {
+            self.overflow.scroll(placement, pan.previous.0 - x);
+            self.refresh_hover();
+            self.request_redraw();
+        }
+        if pan.horizontal.is_some() {
+            pan.previous = (x, y);
+        }
+        self.overflow_pan = Some(pan);
+        captured
+    }
+
+    /// None until the drag threshold is crossed (or when no pan is active).
+    /// Hosts use this to defer document scrolling and retain the same axis lock.
+    pub fn pan_axis(&self) -> Option<PanAxis> {
+        self.overflow_pan.as_ref()?.horizontal.map(|horizontal| {
+            if horizontal {
+                PanAxis::Horizontal
+            } else {
+                PanAxis::Vertical
+            }
+        })
+    }
+
+    pub fn end_pan(&mut self) {
+        self.overflow_pan = None;
+    }
+
     pub fn wheel(&mut self, delta: f32) {
         self.dispatch(Action::Wheel(delta));
     }
@@ -1406,15 +1642,50 @@ impl DocumentViewer {
     }
 
     fn reduce_focus_adjacent(&mut self, direction: isize, headings_only: bool) -> ActionResult {
-        let Some(target) = self
+        let visible = self.visible_horizontal_overflows();
+        let candidates: Vec<_> = self
             .navigation
-            .adjacent(self.focused.as_ref(), direction, headings_only)
-            .cloned()
-        else {
+            .targets()
+            .iter()
+            .filter(|target| {
+                if headings_only {
+                    return target.kind == NavigationKind::Heading;
+                }
+                let wide = self.composed.blocks.iter().any(|block| {
+                    block.layout.node == target.flow_node()
+                        && crate::overflow::block_placement(&block.layout, self.composed.width)
+                            .is_some()
+                });
+                !wide || visible.iter().any(|p| Some(p.owner) == target.flow_node())
+            })
+            .collect();
+        if candidates.is_empty() {
             return ActionResult::default();
+        }
+        let current = candidates
+            .iter()
+            .position(|target| Some(target.identity()) == self.focused);
+        let index = match (current, direction.is_negative()) {
+            (Some(i), true) => i.saturating_sub(1),
+            (Some(i), false) => (i + 1).min(candidates.len() - 1),
+            (None, true) => candidates.len() - 1,
+            (None, false) => 0,
         };
+        let target = candidates[index].clone();
         self.focused = Some(target.identity());
-        self.reveal_text(target.range);
+        let owner = target.flow_node();
+        self.overflow.focused = visible
+            .iter()
+            .find(|p| Some(p.owner) == owner)
+            .map(|p| p.owner);
+        if self.overflow.focused.is_none() {
+            self.reveal_text(target.range);
+        }
+        self.overflow_focus_fragment = self
+            .overflow
+            .focused
+            .map(|_| (self.reading_mode, self.current_page));
+        self.request_redraw();
         ActionResult { value: true }
     }
 
@@ -1783,7 +2054,11 @@ impl DocumentViewer {
                 .ok_or_else(|| anyhow::anyhow!("document layout is not available"))?;
             if self.reading_mode == ReadingMode::Paginated {
                 self.rebuild_paginated_layout(height)?;
+                if let Some(anchor) = self.page_anchor.take() {
+                    self.current_page = self.pages.page_for_text(anchor);
+                }
             }
+            self.validate_overflow_focus();
             let focused = self
                 .focused
                 .as_ref()
@@ -1802,6 +2077,7 @@ impl DocumentViewer {
                 search_matches: &self.search_matches,
                 active_match,
                 selection: self.selection,
+                overflow: Some(&self.overflow),
             };
             if self.reading_mode == ReadingMode::Paginated {
                 let selection = PageSelection {
@@ -2111,6 +2387,9 @@ impl DocumentViewer {
     }
 
     fn text_position_at_pointer(&self, pointer_x: f32, pointer_y: f32) -> Option<TextPosition> {
+        if self.overflow_pointer_is_clipped(pointer_x, pointer_y) {
+            return None;
+        }
         if self.reading_mode == ReadingMode::Paginated {
             let margin = self.renderer.settings().theme.page_margin;
             if pointer_y < margin || pointer_y >= self.size.1 as f32 - margin {
@@ -2120,7 +2399,7 @@ impl DocumentViewer {
                 &self.composed,
                 &self.pages,
                 self.current_page,
-                pointer_x - self.layout_x,
+                pointer_x - self.layout_x + self.overflow_offset_at(pointer_x, pointer_y),
                 pointer_y - margin,
             );
         }
@@ -2134,6 +2413,9 @@ impl DocumentViewer {
         pointer_x: f32,
         pointer_y: f32,
     ) -> Option<&crate::navigation::NavigationTarget> {
+        if self.overflow_pointer_is_clipped(pointer_x, pointer_y) {
+            return None;
+        }
         if self.reading_mode == ReadingMode::Paginated {
             let margin = self.renderer.settings().theme.page_margin;
             if pointer_y < margin || pointer_y >= self.size.1 as f32 - margin {
@@ -2143,7 +2425,7 @@ impl DocumentViewer {
                 &self.composed,
                 &self.pages,
                 self.current_page,
-                pointer_x - self.layout_x,
+                pointer_x - self.layout_x + self.overflow_offset_at(pointer_x, pointer_y),
                 pointer_y - margin,
             );
         }
@@ -2163,7 +2445,7 @@ impl DocumentViewer {
             Some((pointer_x - self.layout_x, document_y))
         } else {
             Some((
-                pointer_x - self.layout_x,
+                pointer_x - self.layout_x + self.overflow_offset_at(pointer_x, pointer_y),
                 pointer_y - margin + self.scroll_y,
             ))
         }
@@ -2313,6 +2595,7 @@ impl DocumentViewer {
             search_matches: &self.search_matches,
             active_match,
             selection: self.selection,
+            overflow: Some(&self.overflow),
         }
     }
 
@@ -2510,6 +2793,10 @@ fn append_flow_fragment(path: &str, anchor: Option<&flow::AnchorId>) -> String {
         None => path.to_owned(),
     }
 }
+
+#[cfg(all(test, feature = "test-fonts"))]
+#[path = "viewer_overflow_tests.rs"]
+mod overflow_tests;
 
 #[cfg(test)]
 mod tests {

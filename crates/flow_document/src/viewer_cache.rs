@@ -228,6 +228,8 @@ fn continuous_bytes(layout: &ContinuousLayout) -> usize {
         + layout.blocks.capacity() * size_of::<BlockLayout>()
         + layout.blocks.iter().map(block_dynamic_bytes).sum::<usize>()
         + layout.quote_bars.capacity() * size_of::<crate::layout::ContinuousQuoteBarLayout>()
+        + layout.overflow_placements.capacity()
+            * size_of::<crate::overflow::HorizontalOverflowPlacement>()
 }
 
 fn block_dynamic_bytes(block: &BlockLayout) -> usize {

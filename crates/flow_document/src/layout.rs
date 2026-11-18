@@ -281,6 +281,8 @@ pub struct ContinuousLayout {
     pub height: f32,
     pub blocks: Vec<BlockLayout>,
     pub quote_bars: Vec<ContinuousQuoteBarLayout>,
+    #[cfg(feature = "render")]
+    pub(crate) overflow_placements: Vec<crate::overflow::HorizontalOverflowPlacement>,
 }
 
 /// A continuous-mode quotation decoration spanning adjacent quoted blocks.
@@ -296,7 +298,14 @@ impl ContinuousLayout {
     /// globally positioned blocks.
     pub fn new(width: f32, height: f32, blocks: Vec<BlockLayout>) -> Self {
         let quote_bars = continuous_quote_bars(&blocks);
+        #[cfg(feature = "render")]
+        let overflow_placements = blocks
+            .iter()
+            .filter_map(|block| crate::overflow::block_placement(block, width))
+            .collect();
         Self {
+            #[cfg(feature = "render")]
+            overflow_placements,
             width,
             height,
             blocks,

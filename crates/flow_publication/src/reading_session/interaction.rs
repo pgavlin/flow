@@ -24,6 +24,13 @@ viewing_operations! {
     cancel_pending_interaction() -> ();
     request_redraw() -> ();
     wheel(delta: f32) -> ();
+    wheel_horizontal(delta: f32) -> bool;
+    scroll_horizontal(owner: flow_document::overflow::OverflowOwner, delta: f32) -> bool;
+    scroll_focused_horizontal(delta: f32) -> bool;
+    clear_focus() -> ();
+    begin_pan(x: f32, y: f32) -> ();
+    pan_to(x: f32, y: f32) -> bool;
+    end_pan() -> ();
     scroll_by(delta: f32) -> bool;
     scroll_to(position: f32) -> ();
     set_continuous_scroll_position(position: f32) -> ();

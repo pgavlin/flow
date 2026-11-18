@@ -1,0 +1,14 @@
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Nested horizontal overflow</title></head>
+<body>
+<table>
+<thead><tr><th>Sample</th><th>Authored code</th></tr></thead>
+<tbody>
+<tr><td>Nested code</td><td><pre><code>let value = build_record("a long authored line inside a table must use the outer table viewport", "far right");
+let next = build_record("the table and code must move together", "far right");</code></pre></td></tr>
+<tr><td>Nested table</td><td><table><tr><td>nested_identifier_abcdefghijklmnopqrstuvwxyz_0123456789</td><td>another_identifier_abcdefghijklmnopqrstuvwxyz_0123456789</td></tr></table></td></tr>
+</tbody>
+</table>
+<p>Normal content following the outer table.</p>
+</body>
+</html>

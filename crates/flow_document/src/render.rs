@@ -48,6 +48,7 @@ fn paint_target_kind<T: PaintTarget>() -> &'static str {
 pub struct Renderer {
     pub(crate) settings: RenderSettings,
     layout_revision: u64,
+    interactive_overflow: bool,
     environment_key: [u8; 32],
     pub(crate) fonts: FontSlot,
     font_data: Vec<FontResource>,
@@ -83,6 +84,20 @@ pub struct InteractionState<'a> {
     pub search_matches: &'a [TextRange],
     pub active_match: Option<TextRange>,
     pub selection: Option<Selection>,
+    /// Interactive viewers opt in; static PNG/print callers retain their policy.
+    pub overflow: Option<&'a crate::overflow::HorizontalOverflowState>,
+}
+
+impl<'a> InteractionState<'a> {
+    fn semantic_focus(self) -> Option<&'a NavigationTarget> {
+        self.focused.filter(|target| {
+            // A keyboard-focused overflow owner has one viewport outline, not
+            // an additional semantic decoration on every authored code line.
+            self.overflow
+                .and_then(|state| state.focused())
+                .is_none_or(|owner| target.flow_node() != Some(owner))
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +132,7 @@ impl Renderer {
         let mut renderer = Self {
             settings,
             layout_revision: 0,
+            interactive_overflow: false,
             environment_key: [0; 32],
             fonts,
             font_data: Vec::new(),
@@ -124,6 +140,12 @@ impl Renderer {
         };
         renderer.update_environment_key();
         renderer
+    }
+
+    pub(crate) fn enable_interactive_overflow(&mut self) {
+        self.interactive_overflow = true;
+        self.layout_revision = self.layout_revision.wrapping_add(1);
+        self.update_environment_key();
     }
 
     pub fn settings(&self) -> &RenderSettings {
@@ -209,6 +231,7 @@ impl Renderer {
     fn update_environment_key(&mut self) {
         let mut digest = blake3::Hasher::new();
         digest.update(b"flow-layout-environment-v1\0");
+        digest.update(&[u8::from(self.interactive_overflow)]);
         digest.update(&[u8::from(self.images.get_mut().namespace.is_some())]);
         let namespace = self
             .images
@@ -1392,7 +1415,11 @@ impl Renderer {
             table_horizontal_padding: self.settings.theme.table_horizontal_padding,
             table_vertical_padding: self.settings.theme.table_vertical_padding,
             table_min_column_width: self.settings.theme.table_min_column_width,
-            table_overflow: TableOverflowPolicy::EmergencyFit,
+            table_overflow: if self.interactive_overflow {
+                TableOverflowPolicy::Overflow
+            } else {
+                TableOverflowPolicy::EmergencyFit
+            },
             minimum_line_width: self.settings.theme.minimum_line_width,
             space_stretch: self.settings.theme.space_stretch,
             space_shrink: self.settings.theme.space_shrink,
@@ -1541,92 +1568,117 @@ impl Renderer {
             }
         }
 
+        let placements = layout.horizontal_overflows(document, page_index);
         for fragment in fragments {
-            match fragment {
-                PageFragment::BlockBox(fragment) => {
-                    let Some(block) = document.blocks.get(fragment.block) else {
-                        continue;
-                    };
-                    self.draw_page_block_box(surface, &block.layout, fragment, x_offset, scale);
-                }
-                PageFragment::Atomic(fragment) => {
-                    let Some(block) = document.blocks.get(fragment.block) else {
-                        continue;
-                    };
-                    let Some(object) = block.layout.atomic_objects.get(fragment.atomic) else {
-                        continue;
-                    };
-                    self.draw_page_atomic(
-                        surface,
-                        &mut fonts,
-                        &block.layout,
-                        object,
-                        fragment,
-                        x_offset,
-                        scale,
-                        interaction,
-                        palette,
-                    );
-                }
-                PageFragment::Rule(fragment) => {
-                    self.draw_page_rule(surface, fragment, x_offset, scale, palette);
-                }
-                PageFragment::TableRule(fragment) => {
-                    let (thickness, color) = match fragment.kind {
-                        layout::TableRuleKind::Strong => (
-                            self.settings.theme.table_strong_rule_thickness,
-                            palette.table_rule_strong,
-                        ),
-                        layout::TableRuleKind::Light => (
-                            self.settings.theme.table_light_rule_thickness,
-                            palette.table_rule_light,
-                        ),
-                    };
-                    surface.fill_rect(
-                        (x_offset + fragment.x) * scale,
-                        fragment.y * scale,
-                        fragment.width * scale,
-                        (thickness * scale).max(1.0),
-                        color,
-                    );
-                }
-                PageFragment::TableQuoteBar(fragment) => {
-                    if self.settings.theme.quote_bar_width > 0.0 {
-                        surface.fill_rect(
-                            (x_offset + fragment.x) * scale,
-                            fragment.y * scale,
-                            self.settings.theme.quote_bar_width * scale,
-                            fragment.height * scale,
-                            palette.quote_bar,
-                        );
+            let owner = crate::overflow::fragment_block(fragment)
+                .and_then(|i| document.blocks.get(i))
+                .and_then(|b| b.layout.node);
+            let placement = placements.iter().find(|p| Some(p.owner) == owner).copied();
+            crate::overflow::paint_content(
+                surface,
+                placement,
+                interaction.overflow,
+                x_offset,
+                0.0,
+                scale,
+                |surface, x_offset| match fragment {
+                    PageFragment::BlockBox(fragment) => {
+                        let Some(block) = document.blocks.get(fragment.block) else {
+                            return;
+                        };
+                        self.draw_page_block_box(surface, &block.layout, fragment, x_offset, scale);
                     }
-                }
-                PageFragment::Lines(fragment) => {
-                    let Some(block) = document.blocks.get(fragment.block) else {
-                        continue;
-                    };
-                    let Some(first) = block.layout.lines.get(fragment.line_start) else {
-                        continue;
-                    };
-                    let y_offset = fragment.y - first.y;
-                    for line in &block.layout.lines[fragment.line_start..fragment.line_end] {
-                        self.draw_page_line(
+                    PageFragment::Atomic(fragment) => {
+                        let Some(block) = document.blocks.get(fragment.block) else {
+                            return;
+                        };
+                        let Some(object) = block.layout.atomic_objects.get(fragment.atomic) else {
+                            return;
+                        };
+                        self.draw_page_atomic(
                             surface,
                             &mut fonts,
-                            line,
+                            &block.layout,
+                            object,
+                            fragment,
                             x_offset,
-                            y_offset,
                             scale,
                             interaction,
                             palette,
                         );
                     }
-                }
-                PageFragment::QuoteBar(_) | PageFragment::TableSlice(_) => {}
+                    PageFragment::Rule(fragment) => {
+                        self.draw_page_rule(surface, fragment, x_offset, scale, palette);
+                    }
+                    PageFragment::TableRule(fragment) => {
+                        let (thickness, color) = match fragment.kind {
+                            layout::TableRuleKind::Strong => (
+                                self.settings.theme.table_strong_rule_thickness,
+                                palette.table_rule_strong,
+                            ),
+                            layout::TableRuleKind::Light => (
+                                self.settings.theme.table_light_rule_thickness,
+                                palette.table_rule_light,
+                            ),
+                        };
+                        surface.fill_rect(
+                            (x_offset + fragment.x) * scale,
+                            fragment.y * scale,
+                            fragment.width * scale,
+                            (thickness * scale).max(1.0),
+                            color,
+                        );
+                    }
+                    PageFragment::TableQuoteBar(fragment) => {
+                        if self.settings.theme.quote_bar_width > 0.0 {
+                            surface.fill_rect(
+                                (x_offset + fragment.x) * scale,
+                                fragment.y * scale,
+                                self.settings.theme.quote_bar_width * scale,
+                                fragment.height * scale,
+                                palette.quote_bar,
+                            );
+                        }
+                    }
+                    PageFragment::Lines(fragment) => {
+                        let Some(block) = document.blocks.get(fragment.block) else {
+                            return;
+                        };
+                        let Some(first) = block.layout.lines.get(fragment.line_start) else {
+                            return;
+                        };
+                        let y_offset = fragment.y - first.y;
+                        for line in &block.layout.lines[fragment.line_start..fragment.line_end] {
+                            self.draw_page_line(
+                                surface,
+                                &mut fonts,
+                                line,
+                                x_offset,
+                                y_offset,
+                                scale,
+                                interaction,
+                                palette,
+                            );
+                        }
+                    }
+                    PageFragment::QuoteBar(_) | PageFragment::TableSlice(_) => {}
+                },
+            );
+        }
+        if let Some(state) = interaction.overflow {
+            for placement in &placements {
+                crate::overflow::paint_affordance(
+                    surface,
+                    *placement,
+                    state,
+                    (x_offset, 0.0),
+                    scale,
+                    palette.muted,
+                );
             }
         }
 
-        if let Some(target) = interaction.focused {
+        if let Some(target) = interaction.semantic_focus() {
             let mut previous_block = None;
             for fragment in fragments {
                 let (block_index, block_y) = match fragment {
@@ -1665,14 +1717,28 @@ impl Renderer {
                 }
                 previous_block = Some(block_index);
                 if let Some(block) = document.blocks.get(block_index) {
-                    draw_target_focus(
+                    let placement = placements
+                        .iter()
+                        .find(|p| Some(p.owner) == block.layout.node)
+                        .copied();
+                    crate::overflow::paint_content(
                         surface,
-                        &block.layout,
-                        target,
+                        placement,
+                        interaction.overflow,
                         x_offset,
-                        block_y,
+                        0.0,
                         scale,
-                        palette,
+                        |surface, x_offset| {
+                            draw_target_focus(
+                                surface,
+                                &block.layout,
+                                target,
+                                x_offset,
+                                block_y,
+                                scale,
+                                palette,
+                            );
+                        },
                     );
                 }
             }
@@ -2053,350 +2119,393 @@ impl Renderer {
             if !vertically_visible(y_offset + block.y, block.height, viewport_height) {
                 continue;
             }
-            if let Some(box_layout) = &block.box_layout {
-                let x = (x_offset + box_layout.x) * scale;
-                let y = (y_offset + block.y) * scale;
-                let width = box_layout.width * scale;
-                let height = block.height * scale;
-                let [top, right, bottom, left] = box_layout.borders;
-                if top.width > 0.0 {
-                    surface.fill_rect(
-                        x,
-                        y,
-                        width,
-                        (top.width * scale).max(1.0),
-                        top.color.unwrap_or(palette.foreground),
-                    );
-                }
-                if right.width > 0.0 {
-                    surface.fill_rect(
-                        x + width - (right.width * scale).max(1.0),
-                        y,
-                        (right.width * scale).max(1.0),
-                        height,
-                        right.color.unwrap_or(palette.foreground),
-                    );
-                }
-                if bottom.width > 0.0 {
-                    surface.fill_rect(
-                        x,
-                        y + height - (bottom.width * scale).max(1.0),
-                        width,
-                        (bottom.width * scale).max(1.0),
-                        bottom.color.unwrap_or(palette.foreground),
-                    );
-                }
-                if left.width > 0.0 {
-                    surface.fill_rect(
-                        x,
-                        y,
-                        (left.width * scale).max(1.0),
-                        height,
-                        left.color.unwrap_or(palette.foreground),
-                    );
-                }
-            }
-            for object in &block.atomic_objects {
-                if !vertically_visible(y_offset + object.y, object.height, viewport_height) {
-                    continue;
-                }
-                let thematic = matches!(object.kind, layout::AtomicLayoutKind::ThematicBreak);
-                let mut painted = thematic;
-                if thematic && !block.rule {
-                    surface.fill_rect(
-                        (x_offset + object.x) * scale,
-                        (y_offset + object.y + object.height / 2.0) * scale,
-                        object.width * scale,
-                        (self.settings.theme.rule_thickness * scale).max(1.0),
-                        palette.horizontal_rule,
-                    );
-                }
-                if let layout::AtomicLayoutKind::Image { key, .. } = &object.kind {
-                    let width = (object.width * scale).round().max(1.0) as u32;
-                    let height = (object.height * scale).round().max(1.0) as u32;
-                    if let Some(pixels) = self.images.borrow_mut().scaled_pixels(key, width, height)
-                    {
-                        surface.blend_pixels_resource(
-                            image_paint_resource_id(pixels.resource_id(), width, height),
-                            (
-                                ((x_offset + object.x) * scale).round() as i32,
-                                ((y_offset + object.y) * scale).round() as i32,
-                            ),
-                            width,
-                            height,
-                            pixels.stride(),
-                            pixels.format(),
-                            pixels.pixels(),
-                        );
-                        painted = true;
-                    }
-                }
-                if !painted {
-                    let thickness = scale.max(1.0);
-                    let x = (x_offset + object.x) * scale;
-                    let y = (y_offset + object.y) * scale;
-                    let width = object.width * scale;
-                    let height = object.height * scale;
-                    surface.fill_rect(x, y, width, thickness, palette.muted);
-                    surface.fill_rect(x, y + height - thickness, width, thickness, palette.muted);
-                    surface.fill_rect(x, y, thickness, height, palette.muted);
-                    surface.fill_rect(x + width - thickness, y, thickness, height, palette.muted);
-                    let label = match &object.kind {
-                        layout::AtomicLayoutKind::Image { alt, .. } => alt.as_str(),
-                        layout::AtomicLayoutKind::Placeholder { label } => label.as_str(),
-                        layout::AtomicLayoutKind::ThematicBreak => "",
-                    };
-                    if !label.is_empty() {
-                        let size = (self.settings.font_size * POINTS_TO_LOGICAL_PIXELS)
-                            .min((object.height * 0.5).max(1.0));
-                        let style = TextStyle {
-                            family: FontFamily::Proportional,
-                            size,
-                            weight: FontWeight::Normal,
-                            italic: false,
-                            strikethrough: false,
-                            link: false,
-                            initial_letter: None,
-                            baseline_shift: 0.0,
-                            letter_spacing: 0.0,
-                            bidi: crate::model::flow::BidiState::default(),
-                            bidi_boundary: None,
-                            shape_direction: crate::model::flow::BaseDirection::Auto,
-                        };
-                        let clip_x = x.floor() as i32;
-                        let clip_y = y.floor() as i32;
-                        let clip_width = width.ceil().max(1.0) as u32;
-                        let clip_height = height.ceil().max(1.0) as u32;
-                        let local_x = (x - clip_x as f32) / scale + size * 0.5;
-                        let local_y =
-                            (y - clip_y as f32) / scale + object.height * 0.5 + size * 0.35;
-                        surface.with_viewport(
-                            (clip_x, clip_y),
-                            clip_width,
-                            clip_height,
-                            |surface| {
-                                fonts.draw(
-                                    surface,
-                                    label,
-                                    &style,
-                                    (local_x, local_y),
-                                    scale,
-                                    palette.muted,
-                                );
-                            },
-                        );
-                    }
-                }
-                let search_color = interaction
-                    .search_matches
-                    .iter()
-                    .find(|range| object.range.start < range.end && range.start < object.range.end)
-                    .map(|_| {
-                        if interaction.active_match.is_some_and(|range| {
-                            object.range.start < range.end && range.start < object.range.end
-                        }) {
-                            palette.border
-                        } else {
-                            palette.key_background
-                        }
-                    });
-                let selection_color = interaction.selection.and_then(|selection| {
-                    let range = selection.range();
-                    (range.start < object.range.end && object.range.start < range.end)
-                        .then(|| mix_color(palette.background, palette.link, 0.45))
-                });
-                let hover_color = hovered_flow
-                    .is_some_and(|target| {
-                        target.flow_owns_node(object.node)
-                            && target.flow_destination() == object.flow_link.as_ref()
-                    })
-                    .then_some(palette.link);
-                if let Some(color) = selection_color.or(search_color).or(hover_color) {
-                    let thickness = (2.0 * scale).max(1.0);
-                    let x = (x_offset + object.x) * scale;
-                    let y = (y_offset + object.y) * scale;
-                    let width = object.width * scale;
-                    let height = object.height * scale;
-                    surface.fill_rect(x, y, width, thickness, color);
-                    surface.fill_rect(x, y + height - thickness, width, thickness, color);
-                    surface.fill_rect(x, y, thickness, height, color);
-                    surface.fill_rect(x + width - thickness, y, thickness, height, color);
-                }
-            }
-            if let Some(table) = &block.table {
-                for quote in &table.quote_bars {
-                    surface.fill_rect(
-                        (x_offset + quote.x) * scale,
-                        (y_offset + quote.y) * scale,
-                        self.settings.theme.quote_bar_width * scale,
-                        quote.height * scale,
-                        palette.quote_bar,
-                    );
-                }
-                for rule in &table.rules {
-                    let (thickness, color) = match rule.kind {
-                        layout::TableRuleKind::Strong => (
-                            self.settings.theme.table_strong_rule_thickness,
-                            palette.table_rule_strong,
-                        ),
-                        layout::TableRuleKind::Light => (
-                            self.settings.theme.table_light_rule_thickness,
-                            palette.table_rule_light,
-                        ),
-                    };
-                    surface.fill_rect(
-                        (x_offset + rule.x) * scale,
-                        (y_offset + rule.y) * scale,
-                        rule.width * scale,
-                        (thickness * scale).max(1.0),
-                        color,
-                    );
-                }
-            }
-            if block.rule {
-                surface.fill_rect(
-                    (x_offset + block.rule_x) * scale,
-                    (y_offset + block.y + block.height / 2.0) * scale,
-                    block.rule_width * scale,
-                    (self.settings.theme.rule_thickness * scale).max(1.0),
-                    palette.horizontal_rule,
-                );
-            }
-            for line in &block.lines {
-                if !vertically_visible(y_offset + line.y, line.height, viewport_height) {
-                    continue;
-                }
-                for run in &line.runs {
-                    if interaction
-                        .search_matches
-                        .iter()
-                        .any(|source| run.range.start < source.end && source.start < run.range.end)
-                    {
-                        let color = if interaction.active_match.is_some_and(|source| {
-                            run.range.start < source.end && source.start < run.range.end
-                        }) {
-                            palette.border
-                        } else {
-                            palette.key_background
-                        };
-                        surface.fill_rect(
-                            (x_offset + run.x - 1.0) * scale,
-                            (y_offset + line.y) * scale,
-                            (run.width + 2.0) * scale,
-                            line.height * scale,
-                            color,
-                        );
-                    }
-                }
-                if let Some(selection) = interaction.selection {
-                    let selected = selection.range();
-                    if selected.start < selected.end {
-                        let selection_color = mix_color(palette.background, palette.link, 0.28);
-                        for run in &line.runs {
-                            let start = run.range.start.max(selected.start);
-                            let end = run.range.end.min(selected.end);
-                            if start >= end || task_marker(&run.text).is_some() {
-                                continue;
-                            }
-                            let start_x = x_for_source(&mut fonts, run, start);
-                            let end_x = x_for_source(&mut fonts, run, end);
+            let placement = crate::overflow::block_placement(block, document.width);
+            crate::overflow::paint_content(
+                surface,
+                placement,
+                interaction.overflow,
+                x_offset,
+                y_offset,
+                scale,
+                |surface, x_offset| {
+                    if let Some(box_layout) = &block.box_layout {
+                        let x = (x_offset + box_layout.x) * scale;
+                        let y = (y_offset + block.y) * scale;
+                        let width = box_layout.width * scale;
+                        let height = block.height * scale;
+                        let [top, right, bottom, left] = box_layout.borders;
+                        if top.width > 0.0 {
                             surface.fill_rect(
-                                (x_offset + start_x.min(end_x)) * scale,
-                                (y_offset + line.y) * scale,
-                                (end_x - start_x).abs().max(1.0) * scale,
-                                line.height * scale,
-                                selection_color,
+                                x,
+                                y,
+                                width,
+                                (top.width * scale).max(1.0),
+                                top.color.unwrap_or(palette.foreground),
                             );
                         }
-                        for runs in line.runs.windows(2) {
-                            let [left, right] = runs else {
-                                continue;
-                            };
-                            let gap_start = left.x + left.width;
-                            if gap_start < right.x
-                                && selected.start < right.range.start
-                                && left.range.end < selected.end
+                        if right.width > 0.0 {
+                            surface.fill_rect(
+                                x + width - (right.width * scale).max(1.0),
+                                y,
+                                (right.width * scale).max(1.0),
+                                height,
+                                right.color.unwrap_or(palette.foreground),
+                            );
+                        }
+                        if bottom.width > 0.0 {
+                            surface.fill_rect(
+                                x,
+                                y + height - (bottom.width * scale).max(1.0),
+                                width,
+                                (bottom.width * scale).max(1.0),
+                                bottom.color.unwrap_or(palette.foreground),
+                            );
+                        }
+                        if left.width > 0.0 {
+                            surface.fill_rect(
+                                x,
+                                y,
+                                (left.width * scale).max(1.0),
+                                height,
+                                left.color.unwrap_or(palette.foreground),
+                            );
+                        }
+                    }
+                    for object in &block.atomic_objects {
+                        if !vertically_visible(y_offset + object.y, object.height, viewport_height)
+                        {
+                            continue;
+                        }
+                        let thematic =
+                            matches!(object.kind, layout::AtomicLayoutKind::ThematicBreak);
+                        let mut painted = thematic;
+                        if thematic && !block.rule {
+                            surface.fill_rect(
+                                (x_offset + object.x) * scale,
+                                (y_offset + object.y + object.height / 2.0) * scale,
+                                object.width * scale,
+                                (self.settings.theme.rule_thickness * scale).max(1.0),
+                                palette.horizontal_rule,
+                            );
+                        }
+                        if let layout::AtomicLayoutKind::Image { key, .. } = &object.kind {
+                            let width = (object.width * scale).round().max(1.0) as u32;
+                            let height = (object.height * scale).round().max(1.0) as u32;
+                            if let Some(pixels) =
+                                self.images.borrow_mut().scaled_pixels(key, width, height)
                             {
+                                surface.blend_pixels_resource(
+                                    image_paint_resource_id(pixels.resource_id(), width, height),
+                                    (
+                                        ((x_offset + object.x) * scale).round() as i32,
+                                        ((y_offset + object.y) * scale).round() as i32,
+                                    ),
+                                    width,
+                                    height,
+                                    pixels.stride(),
+                                    pixels.format(),
+                                    pixels.pixels(),
+                                );
+                                painted = true;
+                            }
+                        }
+                        if !painted {
+                            let thickness = scale.max(1.0);
+                            let x = (x_offset + object.x) * scale;
+                            let y = (y_offset + object.y) * scale;
+                            let width = object.width * scale;
+                            let height = object.height * scale;
+                            surface.fill_rect(x, y, width, thickness, palette.muted);
+                            surface.fill_rect(
+                                x,
+                                y + height - thickness,
+                                width,
+                                thickness,
+                                palette.muted,
+                            );
+                            surface.fill_rect(x, y, thickness, height, palette.muted);
+                            surface.fill_rect(
+                                x + width - thickness,
+                                y,
+                                thickness,
+                                height,
+                                palette.muted,
+                            );
+                            let label = match &object.kind {
+                                layout::AtomicLayoutKind::Image { alt, .. } => alt.as_str(),
+                                layout::AtomicLayoutKind::Placeholder { label } => label.as_str(),
+                                layout::AtomicLayoutKind::ThematicBreak => "",
+                            };
+                            if !label.is_empty() {
+                                let size = (self.settings.font_size * POINTS_TO_LOGICAL_PIXELS)
+                                    .min((object.height * 0.5).max(1.0));
+                                let style = TextStyle {
+                                    family: FontFamily::Proportional,
+                                    size,
+                                    weight: FontWeight::Normal,
+                                    italic: false,
+                                    strikethrough: false,
+                                    link: false,
+                                    initial_letter: None,
+                                    baseline_shift: 0.0,
+                                    letter_spacing: 0.0,
+                                    bidi: crate::model::flow::BidiState::default(),
+                                    bidi_boundary: None,
+                                    shape_direction: crate::model::flow::BaseDirection::Auto,
+                                };
+                                let clip_x = x.floor() as i32;
+                                let clip_y = y.floor() as i32;
+                                let clip_width = width.ceil().max(1.0) as u32;
+                                let clip_height = height.ceil().max(1.0) as u32;
+                                let local_x = (x - clip_x as f32) / scale + size * 0.5;
+                                let local_y =
+                                    (y - clip_y as f32) / scale + object.height * 0.5 + size * 0.35;
+                                surface.with_viewport(
+                                    (clip_x, clip_y),
+                                    clip_width,
+                                    clip_height,
+                                    |surface| {
+                                        fonts.draw(
+                                            surface,
+                                            label,
+                                            &style,
+                                            (local_x, local_y),
+                                            scale,
+                                            palette.muted,
+                                        );
+                                    },
+                                );
+                            }
+                        }
+                        let search_color = interaction
+                            .search_matches
+                            .iter()
+                            .find(|range| {
+                                object.range.start < range.end && range.start < object.range.end
+                            })
+                            .map(|_| {
+                                if interaction.active_match.is_some_and(|range| {
+                                    object.range.start < range.end && range.start < object.range.end
+                                }) {
+                                    palette.border
+                                } else {
+                                    palette.key_background
+                                }
+                            });
+                        let selection_color = interaction.selection.and_then(|selection| {
+                            let range = selection.range();
+                            (range.start < object.range.end && object.range.start < range.end)
+                                .then(|| mix_color(palette.background, palette.link, 0.45))
+                        });
+                        let hover_color = hovered_flow
+                            .is_some_and(|target| {
+                                target.flow_owns_node(object.node)
+                                    && target.flow_destination() == object.flow_link.as_ref()
+                            })
+                            .then_some(palette.link);
+                        if let Some(color) = selection_color.or(search_color).or(hover_color) {
+                            let thickness = (2.0 * scale).max(1.0);
+                            let x = (x_offset + object.x) * scale;
+                            let y = (y_offset + object.y) * scale;
+                            let width = object.width * scale;
+                            let height = object.height * scale;
+                            surface.fill_rect(x, y, width, thickness, color);
+                            surface.fill_rect(x, y + height - thickness, width, thickness, color);
+                            surface.fill_rect(x, y, thickness, height, color);
+                            surface.fill_rect(x + width - thickness, y, thickness, height, color);
+                        }
+                    }
+                    if let Some(table) = &block.table {
+                        for quote in &table.quote_bars {
+                            surface.fill_rect(
+                                (x_offset + quote.x) * scale,
+                                (y_offset + quote.y) * scale,
+                                self.settings.theme.quote_bar_width * scale,
+                                quote.height * scale,
+                                palette.quote_bar,
+                            );
+                        }
+                        for rule in &table.rules {
+                            let (thickness, color) = match rule.kind {
+                                layout::TableRuleKind::Strong => (
+                                    self.settings.theme.table_strong_rule_thickness,
+                                    palette.table_rule_strong,
+                                ),
+                                layout::TableRuleKind::Light => (
+                                    self.settings.theme.table_light_rule_thickness,
+                                    palette.table_rule_light,
+                                ),
+                            };
+                            surface.fill_rect(
+                                (x_offset + rule.x) * scale,
+                                (y_offset + rule.y) * scale,
+                                rule.width * scale,
+                                (thickness * scale).max(1.0),
+                                color,
+                            );
+                        }
+                    }
+                    if block.rule {
+                        surface.fill_rect(
+                            (x_offset + block.rule_x) * scale,
+                            (y_offset + block.y + block.height / 2.0) * scale,
+                            block.rule_width * scale,
+                            (self.settings.theme.rule_thickness * scale).max(1.0),
+                            palette.horizontal_rule,
+                        );
+                    }
+                    for line in &block.lines {
+                        if !vertically_visible(y_offset + line.y, line.height, viewport_height) {
+                            continue;
+                        }
+                        for run in &line.runs {
+                            if interaction.search_matches.iter().any(|source| {
+                                run.range.start < source.end && source.start < run.range.end
+                            }) {
+                                let color = if interaction.active_match.is_some_and(|source| {
+                                    run.range.start < source.end && source.start < run.range.end
+                                }) {
+                                    palette.border
+                                } else {
+                                    palette.key_background
+                                };
                                 surface.fill_rect(
-                                    (x_offset + gap_start) * scale,
+                                    (x_offset + run.x - 1.0) * scale,
                                     (y_offset + line.y) * scale,
-                                    (right.x - gap_start) * scale,
+                                    (run.width + 2.0) * scale,
                                     line.height * scale,
-                                    selection_color,
+                                    color,
+                                );
+                            }
+                        }
+                        if let Some(selection) = interaction.selection {
+                            let selected = selection.range();
+                            if selected.start < selected.end {
+                                let selection_color =
+                                    mix_color(palette.background, palette.link, 0.28);
+                                for run in &line.runs {
+                                    let start = run.range.start.max(selected.start);
+                                    let end = run.range.end.min(selected.end);
+                                    if start >= end || task_marker(&run.text).is_some() {
+                                        continue;
+                                    }
+                                    let start_x = x_for_source(&mut fonts, run, start);
+                                    let end_x = x_for_source(&mut fonts, run, end);
+                                    surface.fill_rect(
+                                        (x_offset + start_x.min(end_x)) * scale,
+                                        (y_offset + line.y) * scale,
+                                        (end_x - start_x).abs().max(1.0) * scale,
+                                        line.height * scale,
+                                        selection_color,
+                                    );
+                                }
+                                for runs in line.runs.windows(2) {
+                                    let [left, right] = runs else {
+                                        continue;
+                                    };
+                                    let gap_start = left.x + left.width;
+                                    if gap_start < right.x
+                                        && selected.start < right.range.start
+                                        && left.range.end < selected.end
+                                    {
+                                        surface.fill_rect(
+                                            (x_offset + gap_start) * scale,
+                                            (y_offset + line.y) * scale,
+                                            (right.x - gap_start) * scale,
+                                            line.height * scale,
+                                            selection_color,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        for (run_index, run) in line.runs.iter().enumerate() {
+                            let color = if run.style.link || run.generated_action.is_some() {
+                                palette.link
+                            } else {
+                                syntax_color(run.syntax, palette)
+                            };
+                            let baseline =
+                                y_offset + line.y + line.baseline - run.style.baseline_shift;
+                            if let Some(checked) = task_marker(&run.text) {
+                                draw_task_checkbox(
+                                    surface,
+                                    (x_offset + run.x, baseline),
+                                    run.style.size,
+                                    scale,
+                                    checked,
+                                    palette,
+                                    &self.settings.theme,
+                                );
+                                continue;
+                            }
+                            fonts.draw(
+                                surface,
+                                &run.text,
+                                &run.style,
+                                (x_offset + run.x, baseline),
+                                scale,
+                                color,
+                            );
+                            if run.style.strikethrough {
+                                surface.fill_rect(
+                                    (x_offset + run.x) * scale,
+                                    (baseline
+                                        - run.style.size
+                                            * self.settings.theme.strikethrough_offset)
+                                        * scale,
+                                    run.width * scale,
+                                    (self.settings.theme.decoration_thickness * scale).max(1.0),
+                                    color,
+                                );
+                            }
+                            let hovered_generated = hovered_flow.is_some_and(|target| {
+                                run.generated_action.is_some()
+                                    && target.generated_action() == run.generated_action.as_ref()
+                            });
+                            let hovered_flow_link = hovered_flow.is_some_and(|target| {
+                                run.range.start < target.range.end
+                                    && target.range.start < run.range.end
+                                    && target.flow_destination() == run.flow_link.as_ref()
+                            });
+                            if hovered_flow_link || hovered_generated {
+                                let underline_width = line
+                                    .runs
+                                    .get(run_index + 1)
+                                    .filter(|next| {
+                                        hovered_flow_link && next.flow_link == run.flow_link
+                                            || hovered_generated
+                                                && next.generated_action == run.generated_action
+                                    })
+                                    .map_or(run.width, |next| next.x - run.x);
+                                surface.fill_rect(
+                                    (x_offset + run.x) * scale,
+                                    (baseline
+                                        + run.style.size * self.settings.theme.underline_offset)
+                                        * scale,
+                                    underline_width * scale,
+                                    (self.settings.theme.decoration_thickness * scale).max(1.0),
+                                    color,
                                 );
                             }
                         }
                     }
-                }
-                for (run_index, run) in line.runs.iter().enumerate() {
-                    let color = if run.style.link || run.generated_action.is_some() {
-                        palette.link
-                    } else {
-                        syntax_color(run.syntax, palette)
-                    };
-                    let baseline = y_offset + line.y + line.baseline - run.style.baseline_shift;
-                    if let Some(checked) = task_marker(&run.text) {
-                        draw_task_checkbox(
-                            surface,
-                            (x_offset + run.x, baseline),
-                            run.style.size,
-                            scale,
-                            checked,
-                            palette,
-                            &self.settings.theme,
-                        );
-                        continue;
-                    }
-                    fonts.draw(
-                        surface,
-                        &run.text,
-                        &run.style,
-                        (x_offset + run.x, baseline),
-                        scale,
-                        color,
-                    );
-                    if run.style.strikethrough {
-                        surface.fill_rect(
-                            (x_offset + run.x) * scale,
-                            (baseline - run.style.size * self.settings.theme.strikethrough_offset)
-                                * scale,
-                            run.width * scale,
-                            (self.settings.theme.decoration_thickness * scale).max(1.0),
-                            color,
+                    if let Some(target) = interaction.semantic_focus() {
+                        draw_target_focus(
+                            surface, block, target, x_offset, y_offset, scale, palette,
                         );
                     }
-                    let hovered_generated = hovered_flow.is_some_and(|target| {
-                        run.generated_action.is_some()
-                            && target.generated_action() == run.generated_action.as_ref()
-                    });
-                    let hovered_flow_link = hovered_flow.is_some_and(|target| {
-                        run.range.start < target.range.end
-                            && target.range.start < run.range.end
-                            && target.flow_destination() == run.flow_link.as_ref()
-                    });
-                    if hovered_flow_link || hovered_generated {
-                        let underline_width = line
-                            .runs
-                            .get(run_index + 1)
-                            .filter(|next| {
-                                hovered_flow_link && next.flow_link == run.flow_link
-                                    || hovered_generated
-                                        && next.generated_action == run.generated_action
-                            })
-                            .map_or(run.width, |next| next.x - run.x);
-                        surface.fill_rect(
-                            (x_offset + run.x) * scale,
-                            (baseline + run.style.size * self.settings.theme.underline_offset)
-                                * scale,
-                            underline_width * scale,
-                            (self.settings.theme.decoration_thickness * scale).max(1.0),
-                            color,
-                        );
-                    }
-                }
-            }
-            if let Some(target) = interaction.focused {
-                draw_target_focus(surface, block, target, x_offset, y_offset, scale, palette);
+                },
+            );
+            if let (Some(placement), Some(state)) = (placement, interaction.overflow) {
+                crate::overflow::paint_affordance(
+                    surface,
+                    placement,
+                    state,
+                    (x_offset, y_offset),
+                    scale,
+                    palette.muted,
+                );
             }
         }
     }

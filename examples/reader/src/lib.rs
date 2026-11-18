@@ -16,7 +16,7 @@ use flow_publication::{
     document::{
         pixels::{PixelBuffer, PixelFormat},
         settings::ReadingMode,
-        viewer::{FontResource, PointerButtonInput, ViewerEffect},
+        viewer::{FontResource, PanAxis, PointerButtonInput, ViewerEffect},
     },
     reading_session::{
         LoadFailure, NavigationState, ReadingSession, ReadingSessionError, RequestId, SessionEffect,
@@ -480,6 +480,31 @@ impl App {
             .session
             .as_ref()
             .is_some_and(|session| session.settings().reading_mode == ReadingMode::Paginated);
+        if let Some(session) = &mut self.session {
+            match key {
+                Key::Named(NamedKey::Tab) => {
+                    session.focus_adjacent(if self.modifiers.shift_key() { -1 } else { 1 }, false);
+                    return self.pump();
+                }
+                Key::Named(NamedKey::Escape) => {
+                    session.clear_focus();
+                    return self.pump();
+                }
+                Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight)
+                    if !self.modifiers.alt_key() =>
+                {
+                    let delta = if *key == Key::Named(NamedKey::ArrowLeft) {
+                        -40.0
+                    } else {
+                        40.0
+                    };
+                    if session.scroll_focused_horizontal(delta) {
+                        return self.pump();
+                    }
+                }
+                _ => (),
+            }
+        }
         let action = match key {
             Key::Character(value) if !command && value.eq_ignore_ascii_case("p") => {
                 Some(Command::ToggleMode)
@@ -666,15 +691,19 @@ impl ApplicationHandler<Event> for App {
                     let now = self.started.elapsed();
                     if let Some(session) = &mut self.session {
                         match event {
-                            WindowEvent::MouseWheel { delta, .. } => self.paging.wheel(
-                                session,
-                                match delta {
-                                    MouseScrollDelta::LineDelta(_, y) => -y * 44.0,
+                            WindowEvent::MouseWheel { delta, .. } => {
+                                let (x, y) = match delta {
+                                    MouseScrollDelta::LineDelta(x, y) => (-x * 44.0, -y * 44.0),
                                     MouseScrollDelta::PixelDelta(position) => {
-                                        (-position.y / scale) as f32
+                                        ((-position.x / scale) as f32, (-position.y / scale) as f32)
                                     }
-                                },
-                            )?,
+                                };
+                                if x.abs() > y.abs() && session.wheel_horizontal(x) {
+                                    self.paging.cancel_tail();
+                                } else {
+                                    self.paging.wheel(session, y)?;
+                                }
+                            }
                             WindowEvent::CursorMoved { position, .. } => session.pointer_moved(
                                 Some(((position.x / scale) as f32, (position.y / scale) as f32)),
                                 now,
@@ -698,14 +727,25 @@ impl ApplicationHandler<Event> for App {
                             }
                             WindowEvent::Touch(touch) => match touch.phase {
                                 TouchPhase::Started => {
+                                    session.begin_pan(
+                                        (touch.location.x / scale) as f32,
+                                        (touch.location.y / scale) as f32,
+                                    );
                                     self.touch = Some((touch.id, touch.location, touch.location))
                                 }
                                 TouchPhase::Moved => {
                                     if let Some((id, _, last)) = &mut self.touch
                                         && *id == touch.id
                                     {
-                                        if session.settings().reading_mode
-                                            == ReadingMode::Continuous
+                                        let captured = session.pan_to(
+                                            (touch.location.x / scale) as f32,
+                                            (touch.location.y / scale) as f32,
+                                        );
+                                        if !captured
+                                            && session.viewer().pan_axis()
+                                                == Some(PanAxis::Vertical)
+                                            && session.settings().reading_mode
+                                                == ReadingMode::Continuous
                                         {
                                             session.scroll_by(
                                                 ((last.y - touch.location.y) / scale) as f32,
@@ -718,12 +758,27 @@ impl ApplicationHandler<Event> for App {
                                     if let Some((id, start, _)) = self.touch.take()
                                         && id == touch.id
                                     {
+                                        let captured = session.pan_to(
+                                            (touch.location.x / scale) as f32,
+                                            (touch.location.y / scale) as f32,
+                                        );
+                                        let axis = session.viewer().pan_axis();
+                                        session.end_pan();
+                                        if captured {
+                                            self.paging.cancel_tail();
+                                        }
                                         let dx = (start.x - touch.location.x) / scale;
                                         let dy = (start.y - touch.location.y) / scale;
-                                        if session.settings().reading_mode == ReadingMode::Paginated
-                                            && dx.abs().max(dy.abs()) >= 40.0
+                                        let delta = if axis == Some(PanAxis::Horizontal) {
+                                            dx
+                                        } else {
+                                            dy
+                                        };
+                                        if !captured
+                                            && session.settings().reading_mode
+                                                == ReadingMode::Paginated
+                                            && delta.abs() >= 40.0
                                         {
-                                            let delta = if dx.abs() > dy.abs() { dx } else { dy };
                                             self.paging
                                                 .turn(session, if delta > 0.0 { 1 } else { -1 })?;
                                         } else if dx.hypot(dy) < 5.0 {
@@ -752,7 +807,10 @@ impl ApplicationHandler<Event> for App {
                                         }
                                     }
                                 }
-                                TouchPhase::Cancelled => self.touch = None,
+                                TouchPhase::Cancelled => {
+                                    session.end_pan();
+                                    self.touch = None;
+                                }
                             },
                             _ => (),
                         }
