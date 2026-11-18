@@ -354,7 +354,7 @@ impl ReadingSession {
             job.viewer.provide_image_metadata(request, width, height);
         }
         if changed {
-            self.invalidate_page_counts();
+            self.invalidate_document_page_counts(key);
         }
     }
 

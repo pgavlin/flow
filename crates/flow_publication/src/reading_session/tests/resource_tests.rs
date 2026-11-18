@@ -250,6 +250,132 @@ fn publication_pagination_waits_for_intrinsic_metadata_and_rebuilds_after_respon
 }
 
 #[test]
+fn image_metadata_invalidates_only_its_document_page_counts() {
+    let (mut session, handle) = loaded();
+    let pages = vec![Some(3); session.model(handle).unwrap().reading_order().len()];
+    assert!(session.install_publication_page_index(pages.clone()));
+    let other = session
+        .register_publication(single_model("other book", false))
+        .unwrap();
+    let other_key = DocumentCacheKey {
+        publication: other,
+        document: key("one"),
+    };
+    session.invalidate_document_page_counts(&other_key);
+    assert_eq!(session.publication_page_index().unwrap(), pages);
+
+    let scope = DocumentCacheKey {
+        publication: handle,
+        document: key("one"),
+    };
+    session.invalidate_document_page_counts(&scope);
+    for (document, pages) in session
+        .model(handle)
+        .unwrap()
+        .reading_order()
+        .iter()
+        .zip(session.publication_page_index().unwrap())
+    {
+        assert_eq!(
+            *pages,
+            if document == &key("one") {
+                None
+            } else {
+                Some(3)
+            }
+        );
+    }
+}
+
+#[test]
+fn publication_image_pagination_loads_documents_linearly() {
+    fn drain(session: &mut ReadingSession, images: bool, counts: &mut [usize; 3]) {
+        for _ in 0..50_000 {
+            let effects = session.take_effects().unwrap();
+            if effects.is_empty() {
+                return;
+            }
+            for effect in effects {
+                match effect {
+                    SessionEffect::LoadDocument(request) => {
+                        let slot = match request.purpose {
+                            RequestPurpose::Foreground => 0,
+                            RequestPurpose::Pagination => 1,
+                            RequestPurpose::Prefetch => 2,
+                            _ => panic!("unexpected purpose"),
+                        };
+                        counts[slot] += 1;
+                        let source = if images {
+                            format!(
+                                "# Chapter\n\n![image](image-{}.png)",
+                                request.document.as_str()
+                            )
+                        } else {
+                            "# Chapter\n\nA short paragraph.".into()
+                        };
+                        session
+                            .provide_document(request.id, import(&source))
+                            .unwrap();
+                    }
+                    SessionEffect::LoadResource(request) => {
+                        assert_eq!(request.kind, ResourceKind::ImageMetadata);
+                        session
+                            .provide_resource(
+                                request.id,
+                                PreparedResource::ImageMetadata {
+                                    width: 64,
+                                    height: 64,
+                                },
+                            )
+                            .unwrap();
+                    }
+                    _ => (),
+                }
+            }
+        }
+        panic!("pagination did not settle");
+    }
+
+    for images in [false, true] {
+        for count in [10, 50, 100] {
+            let mut description = single_model("linear pagination", false)
+                .description()
+                .clone();
+            description.reading_order = (0..count).map(|i| key(&format!("chapter-{i}"))).collect();
+            description.documents = description
+                .reading_order
+                .iter()
+                .map(|key| DocumentDescriptor {
+                    key: key.clone(),
+                    title: "Chapter".into(),
+                    fonts: vec![],
+                })
+                .collect();
+            let model = Publication::new(description).unwrap();
+            let target = model.start().unwrap();
+            let mut session = ReadingSession::new(Settings {
+                reading_mode: ReadingMode::Paginated,
+                ..Default::default()
+            });
+            assert!(session.register_font_resource(font_data()));
+            session.resize((600, 800));
+            let handle = session.register_publication(model).unwrap();
+            session.open_target(handle, target).unwrap();
+            let mut counts = [0; 3];
+            drain(&mut session, images, &mut counts);
+            session.prepare_publication_pagination().unwrap();
+            drain(&mut session, images, &mut counts);
+            assert!(session.publication_pagination_complete());
+            eprintln!("images={images}, chapters={count}: {counts:?}");
+            assert!(
+                counts.iter().sum::<usize>() <= 2 * count,
+                "excessive document loads: {counts:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn cancelled_images_are_requested_again_after_history_restoration() {
     let mut session = ReadingSession::new(Settings::default());
     session.resize((320, 480));

@@ -176,13 +176,28 @@ impl ReadingSession {
         self.deferred_images
             .retain(|(_, _, _, purpose)| *purpose != RequestPurpose::Pagination);
     }
-    pub(super) fn invalidate_page_counts(&mut self) {
-        if let Some(index) = &mut self.publication_pagination {
-            if index.pages.iter().any(Option::is_some) {
-                self.effects
-                    .push(SessionEffect::PublicationPaginationChanged);
+    pub(super) fn invalidate_document_page_counts(&mut self, key: &DocumentCacheKey) {
+        let Some(index) = &mut self.publication_pagination else {
+            return;
+        };
+        if index.publication != key.publication {
+            return;
+        }
+        let model = self
+            .publications
+            .get(key.publication)
+            .expect("registered publication");
+        let mut changed = false;
+        // Image metadata is document-scoped; learning its dimensions must not
+        // discard stable counts for unrelated documents.
+        for (document, pages) in model.reading_order().iter().zip(&mut index.pages) {
+            if document == &key.document {
+                changed |= pages.take().is_some();
             }
-            index.pages.fill(None);
+        }
+        if changed {
+            self.effects
+                .push(SessionEffect::PublicationPaginationChanged);
         }
     }
     pub(super) fn fail_pagination(&mut self, failure: LoadFailure) {
