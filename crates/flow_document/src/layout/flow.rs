@@ -1302,7 +1302,7 @@ fn collect_text_block_items<'text, M: TextMeasurer>(
                     style,
                     measurer,
                     if computed.text_breaking() == EffectiveTextBreaking::InlineCode {
-                        WordBreaking::InlineCode(available_width)
+                        WordBreaking::InlineCode
                     } else if force_emergency_breaking {
                         WordBreaking::Emergency(available_width)
                     } else if matches!(unit.kind, TextBlockKind::Heading) {
@@ -5902,6 +5902,119 @@ mod tests {
                 .iter()
                 .flat_map(|line| &line.runs)
                 .all(|run| run.style.family == FontFamily::Monospace)
+        );
+    }
+
+    #[test]
+    fn inline_code_breaks_to_reduce_badness_even_when_the_token_fits() {
+        let code = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let markdown = format!(
+            "Example: generated sample checksum `{code}`. Additional ordinary prose follows to exercise paragraph line breaking."
+        );
+        let outcome = crate::formats::markdown::parse(
+            &markdown,
+            crate::formats::markdown::MarkdownOptions::default(),
+        )
+        .unwrap();
+        let styles = outcome.document.resolve_styles(StyleContextKey::default());
+        let options = LayoutOptions {
+            width: 320.0,
+            body_size: 10.0,
+            hyphenation: false,
+            ..LayoutOptions::default()
+        };
+        let layout = layout_flow_document(&outcome.document, &styles, &FixedMeasurer, &options);
+        let block = &layout.blocks[0];
+        let code_lines = block
+            .lines
+            .iter()
+            .filter(|line| {
+                line.runs
+                    .iter()
+                    .any(|run| run.style.family == FontFamily::Monospace)
+            })
+            .count();
+
+        // The hash fits on an otherwise empty line. Keeping it intact would
+        // nevertheless force the short preceding line to stretch excessively.
+        let code_style = block
+            .lines
+            .iter()
+            .flat_map(|line| &line.runs)
+            .find(|run| run.style.family == FontFamily::Monospace)
+            .unwrap()
+            .style
+            .clone();
+        assert!(FixedMeasurer.measure(code, &code_style).width < options.width);
+        assert!(code_lines >= 2);
+        assert_eq!(
+            block
+                .lines
+                .iter()
+                .flat_map(|line| &line.runs)
+                .filter(|run| run.style.family == FontFamily::Monospace)
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            code
+        );
+        assert!(
+            block
+                .lines
+                .iter()
+                .flat_map(|line| &line.runs)
+                .all(|run| run.x + run.width <= options.width + 0.01)
+        );
+    }
+
+    #[test]
+    fn inline_code_preserves_graphemes_and_keeps_short_tokens_intact() {
+        let code = "e\u{301}".repeat(12);
+        let markdown = format!("`{code}`\n\nSome `short` code.");
+        let outcome = crate::formats::markdown::parse(
+            &markdown,
+            crate::formats::markdown::MarkdownOptions::default(),
+        )
+        .unwrap();
+        let styles = outcome.document.resolve_styles(StyleContextKey::default());
+        let options = LayoutOptions {
+            width: 90.0,
+            body_size: 10.0,
+            hyphenation: false,
+            ..LayoutOptions::default()
+        };
+        let layout = layout_flow_document(&outcome.document, &styles, &FixedMeasurer, &options);
+        let wrapped = &layout.blocks[0];
+        assert!(wrapped.lines.len() >= 2);
+        let mut offset = 0;
+        for line in &wrapped.lines {
+            for run in &line.runs {
+                assert!(
+                    code.grapheme_indices(true)
+                        .any(|(boundary, _)| boundary == offset)
+                );
+                offset += run.text.len();
+            }
+        }
+        assert_eq!(offset, code.len());
+        assert_eq!(
+            wrapped
+                .lines
+                .iter()
+                .flat_map(|line| &line.runs)
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            code
+        );
+        let short = &layout.blocks[1];
+        assert_eq!(short.lines.len(), 1);
+        assert_eq!(
+            short.lines[0]
+                .runs
+                .iter()
+                .filter(|run| run.style.family == FontFamily::Monospace)
+                .map(|run| run.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["short"]
         );
     }
 

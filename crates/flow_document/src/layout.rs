@@ -800,7 +800,7 @@ type LayoutItem = Item<AtomId, Space, Break>;
 enum WordBreaking {
     Normal,
     Hyphenate,
-    InlineCode(f32),
+    InlineCode,
     Emergency(f32),
 }
 
@@ -815,8 +815,8 @@ fn push_text_items<'text, M: TextMeasurer>(
     options: &LayoutOptions,
 ) {
     let style = items.push_style(style);
-    if let WordBreaking::InlineCode(width) = word_breaking {
-        push_inline_code_items(items, text, range, style, measurer, width, options);
+    if let WordBreaking::InlineCode = word_breaking {
+        push_inline_code_items(items, text, range, style, measurer, options);
         return;
     }
     for (offset, segment) in text.split_word_bound_indices() {
@@ -885,14 +885,12 @@ fn push_text_items<'text, M: TextMeasurer>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn push_inline_code_items<'text, M: TextMeasurer>(
     items: &mut ParagraphItems<'text>,
     text: &'text str,
     range: TextRange,
     style: StyleId,
     measurer: &M,
-    width: f32,
     options: &LayoutOptions,
 ) {
     let ordinary_breaks = unicode_linebreak::linebreaks(text)
@@ -920,7 +918,7 @@ fn push_inline_code_items<'text, M: TextMeasurer>(
                             .saturating_add(part_offset + part.len())
                             .min(source.end),
                     };
-                    push_emergency_code_piece(items, part, part_range, style, measurer, width);
+                    push_breakable_code_piece(items, part, part_range, style, measurer);
                 }
                 part_offset += part.len();
                 if index + 1 < segment.split('\n').count() {
@@ -951,7 +949,7 @@ fn push_inline_code_items<'text, M: TextMeasurer>(
                 if part_end > part_start {
                     let local_start = part_start - offset;
                     let local_end = part_end - offset;
-                    push_emergency_code_piece(
+                    push_breakable_code_piece(
                         items,
                         &segment[local_start..local_end],
                         TextRange {
@@ -960,7 +958,6 @@ fn push_inline_code_items<'text, M: TextMeasurer>(
                         },
                         style,
                         measurer,
-                        width,
                     );
                 }
                 if part_end < text.len() && ordinary_breaks.binary_search(&part_end).is_ok() {
@@ -977,21 +974,16 @@ fn push_inline_code_items<'text, M: TextMeasurer>(
     }
 }
 
-fn push_emergency_code_piece<'text, M: TextMeasurer>(
+// These opportunities participate in paragraph optimization even when the entire
+// code token fits on a line. Prefer ordinary Unicode breaks, but allow a split
+// inside an identifier/hash rather than excessively stretching surrounding prose.
+fn push_breakable_code_piece<'text, M: TextMeasurer>(
     items: &mut ParagraphItems<'text>,
     text: &'text str,
     range: TextRange,
     style: StyleId,
     measurer: &M,
-    width: f32,
 ) {
-    if measurer.measure(text, items.style(style)).width <= width
-        || text.graphemes(true).count() <= 1
-    {
-        push_word(items, text, range, style, measurer);
-        return;
-    }
-
     let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
     for (index, (offset, grapheme)) in graphemes.iter().enumerate() {
         push_word(
