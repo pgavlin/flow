@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -293,16 +293,17 @@ fn output(root: &Path, tool: &std::ffi::OsStr, args: &[&str]) -> Result<String> 
 fn capture_command(root: &Path, args: &[&str], destination: &Path) -> Result<()> {
     eprintln!("\n==> cargo {}", args.join(" "));
     let file = fs::File::create(destination).map_err(|e| e.to_string())?;
-    let status = Command::new(Tool::Cargo.executable())
+    let output = Command::new(Tool::Cargo.executable())
         .current_dir(root)
         .args(args)
         .stdout(file)
-        .stderr(Stdio::inherit())
-        .status()
+        .output()
         .map_err(|e| format!("could not run benchmark: {e}"))?;
-    if !status.success() {
+    if !output.status.success() {
         return Err(format!(
-            "benchmark command failed ({status}); previous capture was not replaced"
+            "benchmark command failed ({}); previous capture was not replaced\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
         ));
     }
     Ok(())

@@ -159,14 +159,14 @@ fn failed_child_and_abandoned_staging_leave_latest_untouched() {
     {
         let pending = Pending::new(&latest).unwrap();
         staged_path = pending.0.clone();
-        assert!(
-            capture_command(
-                &root.0,
-                &["--flow-invalid-perf-option"],
-                &pending.0.join("output")
-            )
-            .is_err()
-        );
+        let error = capture_command(
+            &root.0,
+            &["--flow-invalid-perf-option"],
+            &pending.0.join("output"),
+        )
+        .unwrap_err();
+        assert!(error.contains("previous capture was not replaced"));
+        assert!(error.contains("--flow-invalid-perf-option"));
     }
     assert!(!staged_path.exists());
     assert_eq!(read(&latest.join("sentinel")).unwrap(), "old");
