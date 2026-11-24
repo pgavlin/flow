@@ -85,7 +85,6 @@ pub struct ComputedStyle {
     font_size_per_mille: u32,
     author_font_size: bool,
     initial_letter: Option<super::InitialLetter>,
-    first_letter: Option<super::InitialLetter>,
     line_height_per_mille: Option<u32>,
     text_indent: Option<super::CssLength>,
     margin_top: Option<super::CssLength>,
@@ -170,10 +169,6 @@ impl ComputedStyle {
 
     pub(crate) const fn initial_letter(&self) -> Option<super::InitialLetter> {
         self.initial_letter
-    }
-
-    pub(crate) const fn first_letter(&self) -> Option<super::InitialLetter> {
-        self.first_letter
     }
 
     pub(crate) const fn line_height_per_mille(&self) -> Option<u32> {
@@ -291,7 +286,6 @@ impl Default for ComputedStyle {
             font_size_per_mille: 1_000,
             author_font_size: false,
             initial_letter: None,
-            first_letter: None,
             line_height_per_mille: None,
             text_indent: None,
             margin_top: None,
@@ -382,7 +376,12 @@ impl FlowDocument {
             // apply only to the node whose style input declares them.
             style.bidi.mode = BidiMode::Normal;
             style.checkbox_marker = false;
-            style.first_letter = None;
+            if style
+                .initial_letter
+                .is_some_and(|initial| initial.target == super::InitialTarget::FirstLetter)
+            {
+                style.initial_letter = None;
+            }
             // These CSS properties do not inherit.
             style.text_indent = None;
             style.margin_top = None;
@@ -496,9 +495,6 @@ fn apply_author_style(style: &mut ComputedStyle, author: &super::AuthorStyle) {
     }
     if let Some(initial_letter) = author.initial_letter {
         style.initial_letter = Some(initial_letter);
-    }
-    if let Some(first_letter) = author.first_letter {
-        style.first_letter = Some(first_letter);
     }
     if let Some(weight) = author.font_weight {
         style.font_weight = if weight >= 600 {

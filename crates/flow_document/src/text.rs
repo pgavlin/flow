@@ -584,6 +584,40 @@ impl FontSystem {
         metrics
     }
 
+    pub fn cap_height(&mut self, style: &TextStyle) -> f32 {
+        self.select_face("M", style, Some(fontique::Script::from_bytes(*b"Latn")))
+            .and_then(|face| font_cap_height(&face, style.size))
+            .unwrap_or(style.size * 0.7)
+    }
+
+    pub fn ink_bottom(&mut self, text: &str, style: &TextStyle) -> f32 {
+        let shaped = self.shape(text, style, 1.0);
+        let mut bottom = f32::NEG_INFINITY;
+        let mut pen_y = 0.0;
+        for segment in &shaped.segments {
+            let Ok(font) =
+                SkrifaFontRef::from_index(segment.face.blob.as_ref(), segment.face.index)
+            else {
+                return self.measure(text, style).descent;
+            };
+            let metrics = font.glyph_metrics(
+                Size::new(style.size),
+                skrifa::instance::LocationRef::default(),
+            );
+            for glyph in &segment.glyphs {
+                if let Some(bounds) = metrics.bounds(skrifa::GlyphId::new(u32::from(glyph.id))) {
+                    bottom = bottom.max(pen_y - glyph.y_offset - bounds.y_min);
+                }
+                pen_y -= glyph.y_advance;
+            }
+        }
+        if bottom.is_finite() {
+            bottom
+        } else {
+            self.measure(text, style).descent
+        }
+    }
+
     pub fn clusters(&mut self, text: &str, style: &TextStyle) -> Vec<ShapedCluster> {
         self.shape(text, style, 1.0).clusters.clone()
     }
@@ -1115,12 +1149,38 @@ impl TextMeasurer for std::cell::RefCell<FontSystem> {
     fn measure(&self, text: &str, style: &TextStyle) -> TextMetrics {
         self.borrow_mut().measure(text, style)
     }
+
+    fn cap_height(&self, style: &TextStyle) -> f32 {
+        self.borrow_mut().cap_height(style)
+    }
+
+    fn ink_bottom(&self, text: &str, style: &TextStyle) -> f32 {
+        self.borrow_mut().ink_bottom(text, style)
+    }
 }
 
 fn font_metrics(face: &Face, size: f32) -> Option<(f32, f32)> {
     let font = SkrifaFontRef::from_index(face.blob.as_ref(), face.index).ok()?;
     let metrics = font.metrics(Size::new(size), skrifa::instance::LocationRef::default());
     Some((metrics.ascent.max(0.0), (-metrics.descent).max(0.0)))
+}
+
+fn font_cap_height(face: &Face, size: f32) -> Option<f32> {
+    let font = SkrifaFontRef::from_index(face.blob.as_ref(), face.index).ok()?;
+    let location = skrifa::instance::LocationRef::default();
+    let metrics = font.metrics(Size::new(size), location);
+    metrics
+        .cap_height
+        .filter(|height| height.is_finite() && *height > 0.0)
+        .or_else(|| {
+            // Older fonts can omit OS/2 sCapHeight. Estimate from a flat-topped
+            // uppercase glyph, not the ascender metric (which includes accents).
+            let glyph = font.charmap().map('H')?;
+            let bounds = font
+                .glyph_metrics(Size::new(size), location)
+                .bounds(glyph)?;
+            (bounds.y_max.is_finite() && bounds.y_max > 0.0).then_some(bounds.y_max)
+        })
 }
 
 fn grapheme_script(grapheme: &str) -> Option<fontique::Script> {
@@ -1235,6 +1295,81 @@ mod tests {
         assert!(cache.entries.iter().any(|entry| entry.key == 1));
         assert!(cache.entries.iter().any(|entry| entry.key == 3));
         assert!(!cache.entries.iter().any(|entry| entry.key == 2));
+    }
+
+    #[test]
+    fn cap_height_uses_font_metrics_or_uppercase_bounds_and_scales() {
+        let mut fonts = FontSystem::default();
+        assert!(fonts.register_font(FontResource::from_bytes(Arc::from(
+            include_bytes!("../tests/fixtures/fonts/literata.ttf").as_slice()
+        ))));
+        for family in ["Charter", "Literata"] {
+            let mut style = body_style();
+            style.family = FontFamily::Named(family.into());
+            style.size = 20.0;
+            let face = fonts
+                .select_face("M", &style, Some(fontique::Script::from_bytes(*b"Latn")))
+                .unwrap();
+            let font = SkrifaFontRef::from_index(face.blob.as_ref(), face.index).unwrap();
+            let location = skrifa::instance::LocationRef::default();
+            let metrics = font.metrics(Size::new(style.size), location);
+            let expected = metrics
+                .cap_height
+                .filter(|height| *height > 0.0)
+                .unwrap_or_else(|| {
+                    let glyph = font.charmap().map('H').unwrap();
+                    font.glyph_metrics(Size::new(style.size), location)
+                        .bounds(glyph)
+                        .unwrap()
+                        .y_max
+                });
+            let height = fonts.cap_height(&style);
+            assert!((height - expected).abs() < 0.001);
+            // Synthetic missing-metric variant: downgrade OS/2 to version 1,
+            // which has no sCapHeight. Keep the glyph outlines unchanged.
+            let mut bytes = face.blob.as_ref().to_vec();
+            let tables = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as usize;
+            let record = (0..tables)
+                .map(|i| 12 + i * 16)
+                .find(|i| &bytes[*i..*i + 4] == b"OS/2")
+                .unwrap();
+            let offset =
+                u32::from_be_bytes(bytes[record + 8..record + 12].try_into().unwrap()) as usize;
+            bytes[offset..offset + 2].copy_from_slice(&1u16.to_be_bytes());
+            let mut no_metric = face.clone();
+            no_metric.blob = Blob::new(Arc::new(bytes));
+            let glyph = font.charmap().map('H').unwrap();
+            let glyph_top = font
+                .glyph_metrics(Size::new(style.size), location)
+                .bounds(glyph)
+                .unwrap()
+                .y_max;
+            assert!((font_cap_height(&no_metric, style.size).unwrap() - glyph_top).abs() < 0.001);
+            assert!(height > 0.0 && height < fonts.measure("H", &style).ascent);
+            style.size *= 2.0;
+            assert!((fonts.cap_height(&style) - height * 2.0).abs() < 0.001);
+        }
+        // The public adapter must not use TextMeasurer's approximate default.
+        let fonts = std::cell::RefCell::new(fonts);
+        let style = body_style();
+        let expected = fonts.borrow_mut().cap_height(&style);
+        assert_eq!(TextMeasurer::cap_height(&fonts, &style), expected);
+    }
+
+    #[test]
+    fn initial_ink_bottom_uses_glyph_bounds_not_font_descent() {
+        let mut fonts = FontSystem::default();
+        let mut style = body_style();
+        style.size = 30.0;
+        let capital_bottom = fonts.ink_bottom("F", &style);
+        let descender_bottom = fonts.ink_bottom("g", &style);
+        assert!(capital_bottom.abs() < 0.1);
+        assert!(descender_bottom > 0.0);
+        style.size *= 2.0;
+        assert!((fonts.ink_bottom("g", &style) - descender_bottom * 2.0).abs() < 0.001);
+        let fonts = std::cell::RefCell::new(fonts);
+        let expected = fonts.borrow_mut().ink_bottom("g", &style);
+        assert_eq!(TextMeasurer::ink_bottom(&fonts, "g", &style), expected);
     }
 
     #[test]

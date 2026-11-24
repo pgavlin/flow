@@ -169,8 +169,6 @@ pub struct AuthorStyle {
     pub font_family: Option<AuthorFontFamily>,
     pub font_size_per_mille: Option<u32>,
     pub initial_letter: Option<InitialLetter>,
-    /// Initial-letter presentation originating from `::first-letter`.
-    pub first_letter: Option<InitialLetter>,
     pub float: Option<AuthorFloat>,
     pub font_weight: Option<u16>,
     pub italic: Option<bool>,
@@ -212,17 +210,77 @@ pub enum AuthorFloat {
 
 #[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+/// One initial-letter treatment, independent of the source CSS syntax.
 pub struct InitialLetter {
+    pub target: InitialTarget,
+    pub sizing: InitialSizing,
+}
+
+impl InitialLetter {
+    pub fn typographic(self) -> Option<TypographicInitial> {
+        match self.sizing {
+            InitialSizing::Typographic(value) => Some(value),
+            InitialSizing::LegacyFloat(_) => None,
+        }
+    }
+
+    pub fn floated(self) -> Option<FloatedInitial> {
+        match self.sizing {
+            InitialSizing::LegacyFloat(value) => Some(value),
+            InitialSizing::Typographic(_) => None,
+        }
+    }
+}
+
+#[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InitialTarget {
+    /// The initial is already isolated in an inline node.
+    ThisInline,
+    /// Extract the first typographic letter from the block's text.
+    FirstLetter,
+}
+
+#[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InitialSizing {
+    /// Cap-height-based sizing in surrounding lines, with an explicit sink.
+    Typographic(TypographicInitial),
+    /// Derive a whole-line span from the authored cap height, preserving CSS
+    /// box sizing. Layout normalizes cap-height/baseline alignment and contains
+    /// painted ink; no general floats.
+    LegacyFloat(FloatedInitial),
+}
+
+#[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TypographicInitial {
     /// Thousandths of the number of surrounding lines occupied by the letter.
     pub size_per_mille: u32,
     /// Number of lines from the first baseline to the letter's baseline.
     pub sink: u16,
-    /// Preserve legacy float/font-size sizing instead of deriving a used size.
-    pub legacy_float: bool,
     pub margin_top: Option<CssLength>,
     pub margin_right: Option<CssLength>,
     pub margin_bottom: Option<CssLength>,
     pub margin_left: Option<CssLength>,
+}
+
+/// Restricted leading left-float presentation, separate from CSS initial-letter.
+/// Edges are in top/right/bottom/left order. Placement is paragraph-local;
+/// this descriptor does not enable arbitrary CSS floats.
+#[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct FloatedInitial {
+    pub line_height_per_mille: Option<u32>,
+    pub margin: [Option<CssLength>; 4],
+    pub padding: [Option<CssLength>; 4],
+    pub border: [Option<CssBorder>; 4],
+    pub width: Option<CssLength>,
+    pub min_width: Option<CssLength>,
+    pub max_width: Option<CssLength>,
+    pub height: Option<CssLength>,
+    pub min_height: Option<CssLength>,
+    pub max_height: Option<CssLength>,
 }
 
 impl AuthorStyle {

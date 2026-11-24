@@ -1407,7 +1407,7 @@ mod tests {
         );
         add(
             "OPS/styles/book.css",
-            b"p.opening { text-align: center; font-style: italic; } @media amzn-kf8 { span.ornamental-initial { font-size: 320%; float: left; margin-top: -0.32em; margin-bottom: -0.32em; } }",
+            b"p.opening { text-align: center; font-style: italic; } @media screen { span.ornamental-initial { font-size: 320%; float: left; margin-top: -0.32em; margin-bottom: -0.32em; } }",
             deflated,
         );
         add("OPS/images/pixel.png", b"synthetic-image", deflated);
@@ -1463,7 +1463,11 @@ mod tests {
                 author.font_size_per_mille == Some(3_200)
                     && author
                         .initial_letter
-                        .is_some_and(|initial| initial.sink == 3)
+                        .and_then(flow_document::model::flow::InitialLetter::floated)
+                        .is_some_and(|initial| {
+                            initial.margin[0]
+                                == Some(flow_document::model::flow::CssLength::Em(-320))
+                        })
             })
         }));
     }

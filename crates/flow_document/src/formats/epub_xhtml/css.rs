@@ -19,7 +19,8 @@ use selectors::{Element, OpaqueElement};
 
 use crate::formats::xhtml::{SourceNodeId, XhtmlSourceNodeKind, XhtmlSourceTree};
 use crate::model::flow::{
-    AuthorBreak, AuthorFontFamily, AuthorStyle, CssBorder, CssColor, CssLength, TextAlignment,
+    AuthorBreak, AuthorFontFamily, AuthorStyle, CssBorder, CssColor, CssLength, InitialLetter,
+    InitialSizing, InitialTarget, TextAlignment, TypographicInitial,
 };
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
@@ -411,7 +412,7 @@ enum Value {
     Break(AuthorBreak),
     Avoid(bool),
     LineCount(u8),
-    InitialLetter(Option<crate::model::flow::InitialLetter>),
+    InitialLetter(Option<TypographicInitial>),
     Float(crate::model::flow::AuthorFloat),
 }
 
@@ -450,9 +451,11 @@ impl<'i> AtRuleParser<'i> for SheetParser {
         }
         let medium = input.expect_ident_cloned()?;
         input.expect_exhausted()?;
+        // Kindle-specific media can disable the normal EPUB drop-cap styles.
+        // This renderer is a screen target, not a Kindle device.
         Ok(matches!(
             medium.to_ascii_lowercase().as_str(),
-            "all" | "screen" | "amzn-kf8"
+            "all" | "screen"
         ))
     }
 
@@ -793,7 +796,7 @@ fn parse_break(value: &str) -> Option<AuthorBreak> {
     }
 }
 
-fn parse_initial_letter(value: &str) -> Option<Option<crate::model::flow::InitialLetter>> {
+fn parse_initial_letter(value: &str) -> Option<Option<TypographicInitial>> {
     if value == "normal" {
         return Some(None);
     }
@@ -817,10 +820,9 @@ fn parse_initial_letter(value: &str) -> Option<Option<crate::model::flow::Initia
         Some("raise") => 1,
         Some(value) => value.parse::<u16>().ok().filter(|value| *value >= 1)?,
     };
-    Some(Some(crate::model::flow::InitialLetter {
+    Some(Some(TypographicInitial {
         size_per_mille,
         sink,
-        legacy_float: false,
         margin_top: None,
         margin_right: None,
         margin_bottom: None,
@@ -960,7 +962,10 @@ pub(super) fn cascade(tree: &XhtmlSourceTree, stylesheets: &[String]) -> Vec<Aut
                     style.font_size_per_mille = Some(value)
                 }
                 (Property::InitialLetter, Value::InitialLetter(value)) => {
-                    style.initial_letter = value
+                    style.initial_letter = value.map(|value| InitialLetter {
+                        target: InitialTarget::ThisInline,
+                        sizing: InitialSizing::Typographic(value),
+                    })
                 }
                 (Property::Float, Value::Float(value)) => style.float = Some(value),
                 (Property::FontWeight, Value::Weight(value)) => style.font_weight = Some(value),
@@ -1000,27 +1005,50 @@ pub(super) fn cascade(tree: &XhtmlSourceTree, stylesheets: &[String]) -> Vec<Aut
                 _ => {}
             }
         }
-        // Older Kindle authoring guidance expressed initial letters as an
-        // enlarged left-floated inline. Preserve that declaration pattern in
-        // the standards-shaped model; layout still requires it to be the
-        // block's first content, so ordinary later floats are not reclassified.
+        // Preserve a restricted leading enlarged left-float as a CSS box,
+        // not as a guessed initial-letter line count. Layout validates position
+        // and content before using this marker.
         if style.initial_letter.is_none()
             && !initial_letter_declared
             && style.float == Some(crate::model::flow::AuthorFloat::Left)
             && style.font_size_per_mille.is_some_and(|size| size > 1_000)
         {
-            let size_per_mille = style.font_size_per_mille.unwrap_or(1_000);
-            style.initial_letter = Some(crate::model::flow::InitialLetter {
-                size_per_mille,
-                sink: (size_per_mille / 1_000).max(1).min(u32::from(u16::MAX)) as u16,
-                legacy_float: true,
-                margin_top: None,
-                margin_right: None,
-                margin_bottom: None,
-                margin_left: None,
+            style.initial_letter = Some(InitialLetter {
+                target: InitialTarget::ThisInline,
+                sizing: InitialSizing::LegacyFloat(crate::model::flow::FloatedInitial {
+                    line_height_per_mille: style.line_height_per_mille,
+                    margin: [
+                        style.margin_top,
+                        style.margin_right,
+                        style.margin_bottom,
+                        style.margin_left,
+                    ],
+                    padding: [
+                        style.padding_top,
+                        style.padding_right,
+                        style.padding_bottom,
+                        style.padding_left,
+                    ],
+                    border: [
+                        style.border_top,
+                        style.border_right,
+                        style.border_bottom,
+                        style.border_left,
+                    ],
+                    width: style.width,
+                    min_width: style.min_width,
+                    max_width: style.max_width,
+                    height: style.height,
+                    min_height: style.min_height,
+                    max_height: style.max_height,
+                }),
             });
         }
-        if let Some(initial) = &mut style.initial_letter {
+        if let Some(InitialLetter {
+            sizing: InitialSizing::Typographic(initial),
+            ..
+        }) = &mut style.initial_letter
+        {
             initial.margin_top = style.margin_top;
             initial.margin_right = style.margin_right;
             initial.margin_bottom = style.margin_bottom;
@@ -1043,7 +1071,10 @@ pub(super) fn cascade(tree: &XhtmlSourceTree, stylesheets: &[String]) -> Vec<Aut
             initial.margin_right = pseudo_length(Property::MarginRight);
             initial.margin_bottom = pseudo_length(Property::MarginBottom);
             initial.margin_left = pseudo_length(Property::MarginLeft);
-            style.first_letter = Some(initial);
+            style.initial_letter = Some(InitialLetter {
+                target: InitialTarget::FirstLetter,
+                sizing: InitialSizing::Typographic(initial),
+            });
         }
     }
     result
@@ -1122,7 +1153,7 @@ mod tests {
         let styles = cascade(
             &prepared.tree,
             &[
-                "#standard { initial-letter: 2.5 2; margin-right: .2em; } #pseudo::first-letter { initial-letter: 7 2; margin-left: .1em; } @media amzn-kf8 { #legacy { font-size: 320%; float: left; margin-top: -.32em; } } @media amzn-mobi { #legacy { font-size: 9em; } }".into(),
+                "#standard { initial-letter: 2.5 2; margin-right: .2em; } #pseudo::first-letter { initial-letter: 7 2; margin-left: .1em; } @media screen { #legacy { font-size: 320%; float: left; margin-top: -.32em; } } @media amzn-mobi { #legacy { font-size: 9em; } }".into(),
             ],
         );
         let by_id = |wanted: &str| {
@@ -1134,23 +1165,52 @@ mod tests {
                 .0
         };
         let standard = styles[by_id("standard").index()].initial_letter.unwrap();
+        assert_eq!(standard.target, InitialTarget::ThisInline);
+        let standard = standard.typographic().unwrap();
         assert_eq!(standard.size_per_mille, 2_500);
         assert_eq!(standard.sink, 2);
-        assert!(!standard.legacy_float);
         assert_eq!(standard.margin_right, Some(CssLength::Em(200)));
 
         let legacy_style = &styles[by_id("legacy").index()];
-        let legacy = legacy_style.initial_letter.unwrap();
+        let legacy = legacy_style.initial_letter.unwrap().floated().unwrap();
         assert_eq!(legacy_style.font_size_per_mille, Some(3_200));
-        assert_eq!(legacy.sink, 3);
-        assert!(legacy.legacy_float);
-        assert_eq!(legacy.margin_top, Some(CssLength::Em(-320)));
+        assert_eq!(legacy.margin[0], Some(CssLength::Em(-320)));
 
-        let pseudo = styles[by_id("pseudo").index()].first_letter.unwrap();
+        let pseudo = styles[by_id("pseudo").index()].initial_letter.unwrap();
+        assert_eq!(pseudo.target, InitialTarget::FirstLetter);
+        let pseudo = pseudo.typographic().unwrap();
         assert_eq!(pseudo.size_per_mille, 7_000);
         assert_eq!(pseudo.sink, 2);
         assert_eq!(pseudo.margin_left, Some(CssLength::Em(100)));
         assert!(styles[by_id("class-only").index()].initial_letter.is_none());
+    }
+
+    #[test]
+    fn kindle_overrides_do_not_disable_epub_drop_caps() {
+        let source = br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p><span class="cap"><span>F</span></span>ollowing text.</p></body></html>"#;
+        let prepared = prepare_with_options(
+            source,
+            XhtmlParseOptions {
+                allow_doctype: true,
+            },
+            &EpubXhtmlProfile,
+        )
+        .unwrap();
+        let styles = cascade(
+            &prepared.tree,
+            &["span.cap { font-size: 6em; float: left; line-height: .6em; margin-top: .15em; margin-right: .15em; font-weight: bold; font-style: italic; } @media amzn-kf8 { span.cap { float: none; font-size: 1em; } } @media amzn-mobi { span.cap { float: none; font-size: 1em; } }".into()],
+        );
+        let cap = prepared.tree.nodes().find(|(_, node)| {
+            matches!(node.kind(), XhtmlSourceNodeKind::Element(element) if element.attributes().iter().any(|attribute| attribute.name().local() == "class" && attribute.value() == "cap"))
+        }).unwrap().0;
+        let style = &styles[cap.index()];
+        assert_eq!(style.font_size_per_mille, Some(6_000));
+        let initial = style
+            .initial_letter
+            .and_then(InitialLetter::floated)
+            .expect("EPUB float remains a drop cap");
+        assert_eq!(initial.line_height_per_mille, Some(600));
+        assert_eq!(initial.margin[1], Some(CssLength::Em(150)));
     }
 
     #[test]

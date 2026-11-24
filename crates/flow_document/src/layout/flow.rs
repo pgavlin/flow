@@ -6,9 +6,9 @@ use super::{
     Atom, AtomicLayout, AtomicLayoutKind, BlockBoxLayout, BlockLayout, BorderLayout, Break,
     ComposedBlock, ComposedDocument, ContinuousLayout, FontFamily, FontWeight, GeneratedAction,
     LayoutBlockKind, LayoutOptions, LineLayout, RunLayout, SyntaxKind, TableLayout, TableRuleKind,
-    TableRuleLayout, TableSizingDiagnostics, TextMeasurer, TextStyle, WordBreaking, highlight_code,
-    line_box, line_breaks, make_atom, materialize_lines, push_atomic_item, push_break_opportunity,
-    push_text_items, set_flow_link,
+    TableRuleLayout, TableSizingDiagnostics, TextMeasurer, TextMetrics, TextStyle, WordBreaking,
+    highlight_code, line_box, line_breaks, make_atom, materialize_lines, push_atomic_item,
+    push_break_opportunity, push_text_items, set_flow_link,
     table::{
         CellMeasure, TableSizingInput, TrackConstraint, automatic_table_width,
         compute_intrinsic_grid, distribute_assignable_width, distribute_emergency_width,
@@ -20,7 +20,7 @@ use crate::model::{
     TextRange,
     flow::{
         EffectiveFontFamily, EffectiveFontWeight, EffectiveTextBreaking, EffectiveVerticalAlign,
-        FlowDocument, NodeId, NodeKind, StyleSnapshot,
+        FlowDocument, InitialLetter, InitialSizing, InitialTarget, NodeId, NodeKind, StyleSnapshot,
     },
 };
 
@@ -1610,17 +1610,38 @@ fn layout_text_block<'text, M: TextMeasurer>(
     let first_content = items.iter().position(
         |item| matches!(item, Item::Box { data, .. } if !items.atom(*data).text.is_empty()),
     );
-    if let (Some(index), Some(first_letter)) = (first_content, computed.first_letter()) {
+    if let (Some(index), Some(first_letter)) = (
+        first_content,
+        computed
+            .initial_letter()
+            .filter(|initial| initial.target == InitialTarget::FirstLetter),
+    ) {
         split_first_letter_item(&mut items, index, first_letter, measurer);
     }
-    let initial = first_content.filter(
-        |index| matches!(&items[*index], Item::Box { data, .. } if !items.atom(*data).atomic && items.style(items.atom(*data).style).initial_letter.is_some()),
-    );
-    let initial_sink = initial
+    let initial = first_content.filter(|index| {
+        matches!(&items[*index], Item::Box { data, .. } if {
+            let atom = items.atom(*data);
+            let style = items.style(atom.style);
+            !atom.atomic && style.initial_letter.is_some_and(|initial| match initial.sizing {
+                InitialSizing::Typographic(_) => true,
+                InitialSizing::LegacyFloat(_) => atom.text.graphemes(true).count() == 1
+                    && !items.iter().skip(index + 1).any(|item| {
+                        matches!(item, Item::Box { data, .. }
+                            if items.style(items.atom(*data).style).initial_letter.and_then(InitialLetter::floated).is_some())
+                    }),
+            })
+        })
+    });
+    let has_floated_initial = initial.is_some_and(|index| {
+        matches!(&items[index], Item::Box { data, .. }
+            if items.style(items.atom(*data).style).initial_letter.and_then(InitialLetter::floated).is_some())
+    });
+    let mut initial_sink = initial
         .and_then(|index| match &items[index] {
             Item::Box { data, .. } => items
                 .style(items.atom(*data).style)
                 .initial_letter
+                .and_then(InitialLetter::typographic)
                 .map(|value| value.sink),
             _ => None,
         })
@@ -1630,20 +1651,40 @@ fn layout_text_block<'text, M: TextMeasurer>(
             unreachable!()
         };
         let cap = items.take_atom(cap);
-        materialize_initial_letter_lines(
-            &items,
-            cap,
-            InitialLetterGeometry {
-                available_width,
-                left: geometry.content_left,
-                top: content_y,
-                origin_indent: text_indent.max(0.0),
-            },
-            &block_style,
-            measurer,
-            options,
-            justify,
-        )
+        let initial_geometry = InitialLetterGeometry {
+            available_width,
+            left: geometry.content_left,
+            top: content_y,
+            origin_indent: text_indent.max(0.0),
+        };
+        if items
+            .style(cap.style)
+            .initial_letter
+            .and_then(InitialLetter::floated)
+            .is_some()
+        {
+            let (lines, affected) = materialize_floated_initial_lines(
+                &items,
+                cap,
+                initial_geometry,
+                &block_style,
+                measurer,
+                options,
+                justify,
+            );
+            initial_sink = affected.min(usize::from(u16::MAX)) as u16;
+            lines
+        } else {
+            materialize_initial_letter_lines(
+                &items,
+                cap,
+                initial_geometry,
+                &block_style,
+                measurer,
+                options,
+                justify,
+            )
+        }
     } else {
         let breaks = line_breaks(&items, available_width);
         materialize_lines(
@@ -1668,12 +1709,12 @@ fn layout_text_block<'text, M: TextMeasurer>(
     if text_indent < 0.0
         && let Some(first) = lines.first_mut()
     {
-        for run in &mut first.runs {
+        for run in first.runs.iter_mut().skip(usize::from(has_floated_initial)) {
             run.x += text_indent;
         }
     }
     if let Some(alignment) = alignment {
-        for line in &mut lines {
+        for (index, line) in lines.iter_mut().enumerate() {
             let used = line
                 .runs
                 .iter()
@@ -1686,7 +1727,8 @@ fn layout_text_block<'text, M: TextMeasurer>(
                 crate::model::flow::TextAlignment::Center => remaining / 2.0,
                 crate::model::flow::TextAlignment::Right => remaining,
             };
-            for run in &mut line.runs {
+            let skip = usize::from(has_floated_initial && index == 0);
+            for run in line.runs.iter_mut().skip(skip) {
                 run.x += shift;
             }
         }
@@ -1833,7 +1875,10 @@ fn split_first_letter_item<'text, M: TextMeasurer>(
     }
 
     let mut cap_style = items.style(original.style).clone();
-    cap_style.initial_letter = Some(initial);
+    cap_style.initial_letter = Some(InitialLetter {
+        target: InitialTarget::ThisInline,
+        ..initial
+    });
     let cap_style = items.push_style(cap_style);
     let mut cap = make_atom(
         items,
@@ -1878,33 +1923,26 @@ fn materialize_initial_letter_lines<M: TextMeasurer>(
         origin_indent,
     } = geometry;
     let mut cap_style = items.style(cap.style).clone();
-    let initial = cap_style.initial_letter.expect("initial letter marker");
+    let initial = cap_style
+        .initial_letter
+        .and_then(InitialLetter::typographic)
+        .expect("typographic initial marker");
     let normal_metrics = measurer.measure("M", block_style);
     let (normal_line_height, _) = line_box(normal_metrics, block_style.size, options.line_spacing);
-    if !initial.legacy_float {
-        let target_height = (initial.size_per_mille as f32 / 1_000.0 - 1.0) * normal_line_height
-            + normal_metrics.ascent;
-        if cap.metrics.ascent > 0.0 {
-            cap_style.size *= target_height.max(normal_metrics.ascent) / cap.metrics.ascent;
-            cap.metrics = measurer.measure(&cap.text, &cap_style);
-        }
+    let normal_cap_height = measurer.cap_height(block_style);
+    let cap_height = measurer.cap_height(&cap_style);
+    let target_height =
+        (initial.size_per_mille as f32 / 1_000.0 - 1.0) * normal_line_height + normal_cap_height;
+    if cap_height > 0.0 {
+        cap_style.size *= target_height / cap_height;
+        cap.metrics = measurer.measure(&cap.text, &cap_style);
     }
     let margin_left = initial
         .margin_left
         .map_or(0.0, |value| value.resolve(cap_style.size, available_width));
-    let margin_right = initial.margin_right.map_or_else(
-        || {
-            if initial.legacy_float {
-                // Legacy Kindle drop-cap recipes commonly omit an inline-end
-                // margin. Keep a small reader gap so following text does not
-                // visually collide with the enlarged glyph.
-                cap_style.size * 0.08
-            } else {
-                0.0
-            }
-        },
-        |value| value.resolve(cap_style.size, available_width),
-    );
+    let margin_right = initial
+        .margin_right
+        .map_or(0.0, |value| value.resolve(cap_style.size, available_width));
     let margin_top = initial
         .margin_top
         .map_or(0.0, |value| value.resolve(cap_style.size, available_width));
@@ -1914,12 +1952,12 @@ fn materialize_initial_letter_lines<M: TextMeasurer>(
     let vertical_extra = ((margin_top.max(0.0) + margin_bottom.max(0.0))
         / normal_line_height.max(1.0))
     .ceil() as usize;
-    let sink = initial_letter_sink(initial, margin_bottom, normal_line_height);
+    let sink = usize::from(initial.sink.max(1));
     let requested_lines = sink.saturating_add(vertical_extra);
     let inset = (cap.metrics.width + margin_left + margin_right)
         .max(0.0)
         .min(available_width * 0.75);
-    let narrow_width = (available_width - inset).max(options.body_size * 8.0);
+    let narrow_width = (available_width - inset).max(1.0);
     let breaks = super::line_breaks_with_widths(
         items,
         InitialLetterLineWidths {
@@ -1940,19 +1978,10 @@ fn materialize_initial_letter_lines<M: TextMeasurer>(
         }
     }
 
-    let target = sink.saturating_sub(1).min(lines.len() - 1);
     let first_baseline = lines[0].y + lines[0].baseline;
-    let target_baseline = lines[target].y + lines[target].baseline;
-    let baseline_margin_top = if initial.legacy_float {
-        // Legacy floated-cap recipes use a negative top margin to compensate
-        // for the enlarged inline box's font leading. The initial-letter model
-        // already aligns using measured ink metrics, so applying that negative
-        // margin again raises the glyph above its intended sink baseline.
-        margin_top.max(0.0)
-    } else {
-        margin_top
-    };
-    cap_style.baseline_shift += first_baseline - (target_baseline + baseline_margin_top);
+    // Keep the requested sink even when the paragraph has fewer text lines.
+    let target_baseline = first_baseline + sink.saturating_sub(1) as f32 * normal_line_height;
+    cap_style.baseline_shift += first_baseline - (target_baseline + margin_top);
     cap_style.initial_letter = None;
     lines[0].range.start = lines[0].range.start.min(cap.range.start);
     lines[0].range.end = lines[0].range.end.max(cap.range.end);
@@ -1993,21 +2022,254 @@ impl LineWidths for InitialLetterLineWidths {
     }
 }
 
-fn initial_letter_sink(
-    initial: crate::model::flow::InitialLetter,
-    margin_bottom: f32,
-    normal_line_height: f32,
-) -> usize {
-    let sink = usize::from(initial.sink.max(1));
-    if !initial.legacy_float || margin_bottom >= 0.0 {
-        return sink;
+/// Geometry of a single typographic initial's CSS content/padding/border/margin
+/// boxes. Font metrics arrive already scaled from design units to CSS pixels.
+#[derive(Clone, Copy, Debug)]
+struct FloatedInitialBox {
+    outer_width: f32,
+    outer_height: f32,
+    content_x: f32,
+    baseline: f32,
+}
+
+fn resolve_floated_initial_box(
+    initial: crate::model::flow::FloatedInitial,
+    metrics: TextMetrics,
+    em: f32,
+    containing_width: f32,
+    normal_line_spacing: f32,
+) -> FloatedInitialBox {
+    use crate::model::flow::CssLength;
+    let resolve =
+        |value: Option<CssLength>| value.map_or(0.0, |value| value.resolve(em, containing_width));
+    // CSS vertical percentage margins/padding use the containing block's width.
+    let margin = initial.margin.map(resolve);
+    let padding = initial.padding.map(|value| resolve(value).max(0.0));
+    let border = initial.border.map(|value| {
+        value.map_or(0.0, |value| {
+            value.width.resolve(em, containing_width).max(0.0)
+        })
+    });
+    let line_height = initial.line_height_per_mille.map_or_else(
+        || line_box(metrics, em, normal_line_spacing).0,
+        |ratio| em * ratio as f32 / 1_000.0,
+    );
+    // Unlike ordinary reader line boxes, an explicitly compressed CSS line
+    // height may be smaller than ascent + descent (negative half-leading).
+    let line_baseline = metrics.ascent + (line_height - metrics.ascent - metrics.descent) / 2.0;
+    let width_value =
+        |value: Option<CssLength>| value.map(|value| value.resolve(em, containing_width).max(0.0));
+    // There is no definite containing height here: percentage heights are auto,
+    // and percentage min/max heights impose no constraint.
+    let height_value = |value: Option<CssLength>| {
+        value
+            .filter(|value| !matches!(value, CssLength::Percent(_)))
+            .map(|value| value.resolve(em, containing_width).max(0.0))
+    };
+    let constrain = |auto: f32, size: Option<f32>, min: Option<f32>, max: Option<f32>| {
+        let size = size.unwrap_or(auto);
+        let size = max.map_or(size, |max| size.min(max));
+        min.map_or(size, |min| size.max(min))
+    };
+    // A single unbreakable initial has equal min/max-content widths, so its
+    // auto shrink-to-fit width is simply its measured advance.
+    let width = constrain(
+        metrics.width,
+        width_value(initial.width),
+        width_value(initial.min_width),
+        width_value(initial.max_width),
+    );
+    let height = constrain(
+        line_height,
+        height_value(initial.height),
+        height_value(initial.min_height),
+        height_value(initial.max_height),
+    );
+    FloatedInitialBox {
+        outer_width: (width
+            + margin[1]
+            + margin[3]
+            + padding[1]
+            + padding[3]
+            + border[1]
+            + border[3])
+            .max(0.0),
+        outer_height: (height
+            + margin[0]
+            + margin[2]
+            + padding[0]
+            + padding[2]
+            + border[0]
+            + border[2])
+            .max(0.0),
+        content_x: margin[3] + border[3] + padding[3],
+        baseline: margin[0] + border[0] + padding[0] + line_baseline,
     }
-    // A negative bottom margin in the legacy floated-cap recipe shortens the
-    // float's exclusion box. Account for that authored adjustment rather than
-    // wrapping an otherwise empty extra line beside the glyph.
-    (sink as f32 + margin_bottom / normal_line_height.max(1.0))
+}
+
+/// Reader normalization for the restricted legacy pattern: align cap heights,
+/// translate the authored box with the glyph, and never exclude less than ink.
+fn align_floated_initial_box(
+    mut box_: FloatedInitialBox,
+    first_baseline: f32,
+    body_cap_height: f32,
+    initial_cap_height: f32,
+    ink_bottom: f32,
+) -> FloatedInitialBox {
+    let baseline = first_baseline - body_cap_height + initial_cap_height;
+    let shift = baseline - box_.baseline;
+    box_.outer_height = (box_.outer_height + shift)
+        .max(baseline + ink_bottom)
+        .max(0.0);
+    box_.baseline = baseline;
+    box_
+}
+
+/// Snap the authored cap-height span, not the font-size multiple, to whole
+/// surrounding lines. Preserve the cap font's own cap-height/font-size ratio.
+fn snapped_initial_font_size(
+    authored_size: f32,
+    authored_cap_height: f32,
+    body_cap_height: f32,
+    line_height: f32,
+) -> f32 {
+    if !authored_cap_height.is_finite()
+        || authored_cap_height <= 0.0
+        || !line_height.is_finite()
+        || line_height <= 0.0
+        || !body_cap_height.is_finite()
+        || body_cap_height <= 0.0
+    {
+        return authored_size;
+    }
+    let span = (1.0 + (authored_cap_height - body_cap_height) / line_height)
         .round()
-        .max(1.0) as usize
+        .max(1.0);
+    let target_cap_height = (span - 1.0) * line_height + body_cap_height;
+    authored_size * target_cap_height / authored_cap_height
+}
+
+fn materialize_floated_initial_lines<M: TextMeasurer>(
+    items: &super::ParagraphItems,
+    mut cap: Atom<'_>,
+    geometry: InitialLetterGeometry,
+    block_style: &TextStyle,
+    measurer: &M,
+    options: &LayoutOptions,
+    justify: bool,
+) -> (Vec<LineLayout>, usize) {
+    let mut cap_style = items.style(cap.style).clone();
+    let initial = cap_style
+        .initial_letter
+        .and_then(InitialLetter::floated)
+        .expect("floated initial marker");
+    let normal_metrics = measurer.measure("M", block_style);
+    let (line_height, baseline) = line_box(normal_metrics, block_style.size, options.line_spacing);
+    let body_cap_height = measurer.cap_height(block_style);
+    cap_style.size = snapped_initial_font_size(
+        cap_style.size,
+        measurer.cap_height(&cap_style),
+        body_cap_height,
+        line_height,
+    );
+    cap.metrics = measurer.measure(&cap.text, &cap_style);
+    // Resolve em-based spacing and line boxes using the normalized font size;
+    // absolute authored dimensions remain unchanged.
+    let authored_box = resolve_floated_initial_box(
+        initial,
+        cap.metrics,
+        cap_style.size,
+        geometry.available_width,
+        options.line_spacing,
+    );
+    let initial_cap_height = measurer.cap_height(&cap_style);
+    let ink_bottom = measurer.ink_bottom(&cap.text, &cap_style);
+    let align = |baseline| {
+        align_floated_initial_box(
+            authored_box,
+            baseline,
+            body_cap_height,
+            initial_cap_height,
+            ink_bottom,
+        )
+    };
+    let mut float_box = align(baseline);
+    let mut affected = (float_box.outer_height / line_height.max(1.0)).ceil() as usize;
+    let widths = |affected_lines| InitialLetterLineWidths {
+        narrow: (geometry.available_width - authored_box.outer_width).max(1.0),
+        full: geometry.available_width,
+        affected_lines,
+    };
+    // Placement is deliberately fixed to the paragraph's content top-left.
+    // Recheck intersections using materialized line heights, since inline
+    // styles can make surrounding lines taller than the paragraph strut.
+    let mut lines = Vec::new();
+    let mut conservative_affected = affected;
+    for attempt in 0..8 {
+        let breaks = super::line_breaks_with_widths(items, widths(affected));
+        lines = materialize_lines(items, breaks, geometry.left, geometry.top, options, justify);
+        if let Some(first) = lines.first() {
+            float_box = align(first.y - geometry.top + first.baseline);
+        }
+        let intersecting = lines
+            .iter()
+            .take_while(|line| line.y < geometry.top + float_box.outer_height)
+            .count();
+        if intersecting == affected.min(lines.len()) {
+            break;
+        }
+        conservative_affected = conservative_affected.max(intersecting);
+        if attempt == 7 {
+            // Mixed-size inline runs can make line breaking oscillate. Bound
+            // work and fall back to a conservative exclusion, using the same
+            // widths for both breaking and run placement.
+            affected = conservative_affected;
+            let breaks = super::line_breaks_with_widths(items, widths(affected));
+            lines = materialize_lines(items, breaks, geometry.left, geometry.top, options, justify);
+            if let Some(first) = lines.first() {
+                float_box = align(first.y - geometry.top + first.baseline);
+            }
+            break;
+        }
+        affected = intersecting;
+    }
+    let wrapped = affected.min(lines.len());
+    for line in &mut lines[..wrapped] {
+        for run in &mut line.runs {
+            run.x += float_box.outer_width;
+        }
+    }
+    if let Some(first) = lines.first_mut() {
+        // The normalized cap height spans whole body lines, aligning both
+        // the first line's cap height and the chosen body-line baseline.
+        cap_style.baseline_shift = first.y + first.baseline - (geometry.top + float_box.baseline);
+        cap_style.initial_letter = None;
+        first.range.start = first.range.start.min(cap.range.start);
+        first.range.end = first.range.end.max(cap.range.end);
+        first.runs.insert(
+            0,
+            RunLayout {
+                text: cap.text.into_owned(),
+                range: cap.range,
+                style: cap_style,
+                syntax: SyntaxKind::Plain,
+                flow_link: cap.flow_link.map(|link| items.link(link).clone()),
+                generated_action: None,
+                x: geometry.left + float_box.content_x,
+                width: cap.metrics.width,
+            },
+        );
+    }
+    // Contain the initial in this paragraph instead of carrying a float into
+    // subsequent paragraphs. Extend the final line's trailing space so both
+    // continuous layout and pagination reserve the normalized box and ink.
+    if let Some(last) = lines.last_mut() {
+        last.height = last
+            .height
+            .max(geometry.top + float_box.outer_height - last.y);
+    }
+    // No float stacking, collision search, or cross-paragraph placement.
+    (lines, wrapped)
 }
 
 fn layout_atomic_block<'text, M: TextMeasurer>(
@@ -3454,7 +3716,17 @@ fn text_style(
         italic: computed.italic(),
         strikethrough: computed.strikethrough(),
         link: computed.is_link(),
-        initial_letter: computed.initial_letter(),
+        initial_letter: computed
+            .initial_letter()
+            .filter(|initial| initial.target == InitialTarget::ThisInline)
+            .map(|mut initial| {
+                if let InitialSizing::LegacyFloat(ref mut box_) = initial.sizing {
+                    box_.line_height_per_mille = box_
+                        .line_height_per_mille
+                        .or(computed.line_height_per_mille());
+                }
+                initial
+            }),
         baseline_shift,
         letter_spacing,
         bidi: computed.bidi(),
@@ -3488,6 +3760,14 @@ mod tests {
     struct FixedMeasurer;
 
     impl TextMeasurer for FixedMeasurer {
+        fn ink_bottom(&self, text: &str, style: &TextStyle) -> f32 {
+            if text.chars().any(|ch| "gjpqy".contains(ch)) {
+                style.size * 0.2
+            } else {
+                0.0
+            }
+        }
+
         fn measure(&self, text: &str, style: &TextStyle) -> super::super::TextMetrics {
             super::super::TextMetrics {
                 width: text.chars().count() as f32 * style.size * 0.5,
@@ -4035,76 +4315,476 @@ mod tests {
     }
 
     #[test]
-    fn legacy_initial_letter_bottom_margin_shortens_the_exclusion_box() {
-        let legacy = InitialLetter {
-            size_per_mille: 3_200,
-            sink: 3,
-            legacy_float: true,
-            margin_top: None,
-            margin_right: None,
-            margin_bottom: None,
-            margin_left: None,
+    fn floated_initial_compressed_line_height_uses_css_box_not_font_multiple() {
+        use crate::model::flow::FloatedInitial;
+        // Synthetic six-em initial on a ten-pixel parent, with a compressed
+        // line box and positive top/right margins. No publication text.
+        let initial = FloatedInitial {
+            line_height_per_mille: Some(600),
+            margin: [
+                Some(CssLength::Em(150)),
+                Some(CssLength::Em(150)),
+                None,
+                None,
+            ],
+            ..FloatedInitial::default()
         };
-        assert_eq!(initial_letter_sink(legacy, -16.0, 20.0), 2);
-        assert_eq!(initial_letter_sink(legacy, 0.0, 20.0), 3);
-
-        let standard = InitialLetter {
-            legacy_float: false,
-            ..legacy
+        let metrics = TextMetrics {
+            width: 30.0,
+            ascent: 48.0,
+            descent: 12.0,
         };
-        assert_eq!(initial_letter_sink(standard, -16.0, 20.0), 3);
+        let box_ = resolve_floated_initial_box(initial, metrics, 60.0, 200.0, 1.2);
+        assert!((box_.outer_width - 39.0).abs() < 0.001);
+        assert!((box_.outer_height - 45.0).abs() < 0.001);
+        assert!((box_.baseline - 45.0).abs() < 0.001);
+        assert_eq!((box_.outer_height / 12.0).ceil() as usize, 4);
+        // Font ascent changes baseline placement, not explicit box height.
+        let other_font = TextMetrics {
+            ascent: 42.0,
+            descent: 18.0,
+            ..metrics
+        };
+        let other = resolve_floated_initial_box(initial, other_font, 60.0, 200.0, 1.2);
+        assert_eq!(other.outer_height, box_.outer_height);
+        assert!((other.baseline - 39.0).abs() < 0.001);
+        // Doubling CSS size doubles all em-based geometry.
+        let scaled = resolve_floated_initial_box(
+            initial,
+            TextMetrics {
+                width: 60.0,
+                ascent: 96.0,
+                descent: 24.0,
+            },
+            120.0,
+            400.0,
+            1.2,
+        );
+        assert_eq!(scaled.outer_height, 2.0 * box_.outer_height);
+        assert_eq!(scaled.outer_width, 2.0 * box_.outer_width);
+        assert_eq!(scaled.baseline, 2.0 * box_.baseline);
     }
 
     #[test]
-    fn legacy_negative_top_margin_preserves_the_sink_baseline() {
+    fn floated_initial_negative_margins_adjust_box_and_baseline() {
+        use crate::model::flow::FloatedInitial;
+        let initial = FloatedInitial {
+            line_height_per_mille: Some(1_000),
+            margin: [
+                Some(CssLength::Em(-250)),
+                None,
+                Some(CssLength::Em(-250)),
+                None,
+            ],
+            ..FloatedInitial::default()
+        };
+        let box_ = resolve_floated_initial_box(
+            initial,
+            TextMetrics {
+                width: 20.0,
+                ascent: 32.0,
+                descent: 8.0,
+            },
+            40.0,
+            200.0,
+            1.2,
+        );
+        assert_eq!(box_.outer_height, 20.0);
+        assert_eq!(box_.baseline, 22.0);
+        assert_eq!(box_.outer_width, 20.0); // no invented reader gap
+        let empty = resolve_floated_initial_box(
+            crate::model::flow::FloatedInitial {
+                margin: [None, None, Some(CssLength::Em(-2_000)), None],
+                ..initial
+            },
+            TextMetrics {
+                width: 20.0,
+                ascent: 32.0,
+                descent: 8.0,
+            },
+            40.0,
+            200.0,
+            1.2,
+        );
+        assert_eq!(empty.outer_height, 0.0);
+    }
+
+    #[test]
+    fn floated_initial_padding_borders_and_size_constraints() {
+        use crate::model::flow::{CssBorder, FloatedInitial};
+        let initial = FloatedInitial {
+            line_height_per_mille: Some(600),
+            margin: [Some(CssLength::Percent(5_000)); 4],
+            padding: [Some(CssLength::Em(100)); 4],
+            border: [Some(CssBorder {
+                width: CssLength::Px(2_000),
+                color: None,
+            }); 4],
+            width: Some(CssLength::Px(80_000)),
+            max_width: Some(CssLength::Px(50_000)),
+            min_width: Some(CssLength::Px(55_000)),
+            height: Some(CssLength::Px(80_000)),
+            max_height: Some(CssLength::Px(30_000)),
+            min_height: Some(CssLength::Px(35_000)),
+        };
+        let metrics = TextMetrics {
+            width: 20.0,
+            ascent: 32.0,
+            descent: 8.0,
+        };
+        let box_ = resolve_floated_initial_box(initial, metrics, 40.0, 200.0, 1.2);
+        assert_eq!(box_.outer_width, 87.0); // 55 + 20 margins + 8 padding + 4 borders
+        assert_eq!(box_.outer_height, 67.0); // 35 + same edges
+        assert_eq!(box_.content_x, 16.0);
+        assert_eq!(box_.baseline, 40.0); // 10 + 2 + 4 + (24 - 40)/2 + 32
+        let auto = resolve_floated_initial_box(
+            FloatedInitial {
+                height: Some(CssLength::Percent(50_000)),
+                min_height: Some(CssLength::Percent(90_000)),
+                max_height: Some(CssLength::Percent(10_000)),
+                ..initial
+            },
+            metrics,
+            40.0,
+            200.0,
+            1.2,
+        );
+        assert_eq!(auto.outer_height, 56.0); // auto line height 24 + edges
+    }
+
+    #[test]
+    fn floated_initial_normal_line_height_uses_scaled_metrics() {
+        let box_ = resolve_floated_initial_box(
+            crate::model::flow::FloatedInitial::default(),
+            TextMetrics {
+                width: 20.0,
+                ascent: 36.0,
+                descent: 12.0,
+            },
+            40.0,
+            200.0,
+            1.1,
+        );
+        assert_eq!(box_.outer_height, 48.0);
+        assert_eq!(box_.baseline, 36.0);
+    }
+
+    fn synthetic_floated_initial(
+        tail: &str,
+        initial_text: &str,
+        prefix: &str,
+        alignment: Option<crate::model::flow::TextAlignment>,
+    ) -> ContinuousLayout {
+        use crate::model::flow::FloatedInitial;
         let mut builder = FlowBuilder::new();
         let root = builder.add_node(NodeKind::Document).unwrap();
         let paragraph = builder.add_node(NodeKind::Paragraph).unwrap();
+        let paragraph_style = builder
+            .intern_style_input(StyleInput::default().with_author(AuthorStyle {
+                line_height_per_mille: Some(1_200),
+                text_alignment: alignment,
+                ..AuthorStyle::default()
+            }))
+            .unwrap();
+        builder.set_style_input(paragraph, paragraph_style).unwrap();
         let initial = builder.add_node(NodeKind::Inline).unwrap();
         let style = builder
             .intern_style_input(StyleInput::default().with_author(AuthorStyle {
-                font_size_per_mille: Some(3_200),
+                font_size_per_mille: Some(6_000),
                 initial_letter: Some(InitialLetter {
-                    size_per_mille: 3_200,
-                    sink: 3,
-                    legacy_float: true,
-                    margin_top: Some(CssLength::Em(-323)),
-                    margin_right: None,
-                    margin_bottom: Some(CssLength::Em(-325)),
-                    margin_left: None,
+                    target: InitialTarget::ThisInline,
+                    sizing: InitialSizing::LegacyFloat(FloatedInitial {
+                        line_height_per_mille: Some(600),
+                        margin: [
+                            Some(CssLength::Em(150)),
+                            Some(CssLength::Em(150)),
+                            None,
+                            None,
+                        ],
+                        ..FloatedInitial::default()
+                    }),
                 }),
                 ..AuthorStyle::default()
             }))
             .unwrap();
         builder.set_style_input(initial, style).unwrap();
-        let letter = builder.add_text("T").unwrap();
-        builder.append(initial, letter).unwrap();
+        // Exercise the nested span pattern without any actual book content.
+        let nested = builder.add_node(NodeKind::Inline).unwrap();
+        let letter = builder.add_text(initial_text).unwrap();
+        builder.append(nested, letter).unwrap();
+        builder.append(initial, nested).unwrap();
+        if !prefix.is_empty() {
+            let prefix = builder.add_text(prefix).unwrap();
+            builder.append(paragraph, prefix).unwrap();
+        }
         builder.append(paragraph, initial).unwrap();
-        let text = builder
-            .add_text("he opening paragraph contains enough words to wrap beside a legacy floated initial before returning to the full line width.")
-            .unwrap();
+        let text = builder.add_text(tail).unwrap();
         builder.append(paragraph, text).unwrap();
         builder.append(root, paragraph).unwrap();
+        let next = builder.add_node(NodeKind::Paragraph).unwrap();
+        let text = builder.add_text("A separate synthetic paragraph.").unwrap();
+        builder.append(next, text).unwrap();
+        builder.append(root, next).unwrap();
         let document = builder.finish().unwrap();
         let styles = document.resolve_styles(StyleContextKey::default());
-        let options = LayoutOptions {
-            width: 120.0,
-            body_size: 10.0,
-            block_spacing: 0.0,
-            ..LayoutOptions::default()
-        };
+        layout_flow_document(
+            &document,
+            &styles,
+            &FixedMeasurer,
+            &LayoutOptions {
+                width: 120.0,
+                body_size: 10.0,
+                block_spacing: 0.0,
+                ..LayoutOptions::default()
+            },
+        )
+    }
 
-        let layout = layout_flow_document(&document, &styles, &FixedMeasurer, &options);
-        let lines = &layout.blocks[0].lines;
-        assert!(lines.len() >= 3);
-        let cap = lines[0].runs.iter().find(|run| run.text == "T").unwrap();
-        let cap_baseline = lines[0].y + lines[0].baseline - cap.style.baseline_shift;
-        let second_baseline = lines[1].y + lines[1].baseline;
-        assert!(
-            (cap_baseline - second_baseline).abs() < 0.01,
-            "cap baseline {cap_baseline}, second baseline {second_baseline}, shift {}",
-            cap.style.baseline_shift
+    #[test]
+    fn floated_initial_wraps_four_lines_and_stays_anchored_in_short_paragraphs() {
+        let long = synthetic_floated_initial(
+            "ebra robots collect tiny pebbles beside a quiet artificial river. These invented sentences provide enough words to wrap around the large initial and then return to the full paragraph width. More synthetic words keep the paragraph longer than the floating box.",
+            "Z",
+            "",
+            None,
         );
+        let lines = &long.blocks[0].lines;
+        assert!(lines.len() > 4);
+        let cap = &lines[0].runs[0];
+        assert_eq!(cap.text, "Z");
+        let baseline = lines[0].y + lines[0].baseline - cap.style.baseline_shift;
+        assert!((baseline - lines[0].y - 45.0).abs() < 0.001);
+        assert!((baseline - 43.0 - (lines[0].y + lines[0].baseline - 7.0)).abs() < 0.001);
+        assert!((baseline - (lines[3].y + lines[3].baseline)).abs() < 0.001);
+        assert!((cap.style.size - 43.0 / 0.7).abs() < 0.001);
+        assert!((cap.width - cap.style.size * 0.5).abs() < 0.001);
+        assert_eq!(cap.x, 0.0);
+        assert_eq!(long.blocks[0].orphans, 4);
+        for line in &lines[..4] {
+            assert!(
+                line.runs
+                    .iter()
+                    .filter(|run| run.text != "Z")
+                    .all(|run| run.x >= cap.width + cap.style.size * 0.15 - 0.001)
+            );
+        }
+        assert_eq!(lines[4].runs[0].x, 0.0);
+        assert_eq!(long.blocks[1].lines[0].runs[0].x, 0.0);
+        let short = synthetic_floated_initial("ebra.", "Z", "", None);
+        let short_line = &short.blocks[0].lines[0];
+        let short_cap = &short_line.runs[0];
+        let short_baseline = short_line.y + short_line.baseline - short_cap.style.baseline_shift;
+        assert!((short_baseline - short_line.y - 45.0).abs() < 0.001);
+        assert!(short.blocks[0].height >= 45.0 - 0.001);
+        assert!(short.blocks[1].y >= short_baseline);
+    }
+
+    #[test]
+    fn initial_size_snaps_the_authored_cap_height_span() {
+        // Synthetic metrics: body cap height 8, line height 12. These cases
+        // include exact spans, rounding boundaries, and a one-line minimum.
+        for (size, cap_height, expected_size) in [
+            (40.0, 20.0, 40.0),
+            (64.0, 32.0, 64.0),
+            (72.0, 36.0, 64.0),
+            (75.98, 37.99, 64.0),
+            (76.0, 38.0, 88.0),
+            (100.0, 50.0, 112.0),
+            (8.0, 4.0, 16.0),
+            (100.0, 40.0, 110.0), // different cap-height/font-size ratio
+        ] {
+            let used = snapped_initial_font_size(size, cap_height, 8.0, 12.0);
+            assert!(
+                (used - expected_size).abs() < 0.001,
+                "size {size}, cap height {cap_height}: {used} != {expected_size}"
+            );
+            let used_cap_height = used * cap_height / size;
+            let span = 1.0 + (used_cap_height - 8.0) / 12.0;
+            assert!((span - span.round()).abs() < 0.001);
+            let doubled = snapped_initial_font_size(size * 2.0, cap_height * 2.0, 16.0, 24.0);
+            assert!((doubled - used * 2.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn initial_size_snapping_handles_missing_or_invalid_metrics() {
+        for cap_height in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(snapped_initial_font_size(60.0, cap_height, 8.0, 12.0), 60.0);
+        }
+        assert_eq!(snapped_initial_font_size(60.0, 42.0, 8.0, 0.0), 60.0);
+        assert_eq!(snapped_initial_font_size(60.0, 42.0, 0.0, 12.0), 60.0);
+    }
+
+    #[test]
+    fn floated_initial_normalization_translates_box_and_protects_ink() {
+        let authored = FloatedInitialBox {
+            outer_width: 30.0,
+            outer_height: 70.0,
+            content_x: 2.0,
+            baseline: 60.0,
+        };
+        let aligned = align_floated_initial_box(authored, 9.0, 7.0, 42.0, 0.0);
+        assert_eq!(aligned.baseline, 44.0);
+        assert_eq!(aligned.outer_height, 54.0); // authored box moved up by 16
+        assert_eq!(aligned.outer_width, authored.outer_width);
+        assert_eq!(aligned.content_x, authored.content_x);
+        let compressed = FloatedInitialBox {
+            outer_height: 30.0,
+            ..authored
+        };
+        let descender = align_floated_initial_box(compressed, 9.0, 7.0, 42.0, 12.0);
+        assert_eq!(descender.outer_height, 56.0); // cannot clip the painted descender
+    }
+
+    #[test]
+    fn short_floated_initial_cannot_overlap_the_following_paragraph() {
+        for initial in ["F", "g"] {
+            let layout = synthetic_floated_initial(" synthetic words.", initial, "", None);
+            let paragraph = &layout.blocks[0];
+            let first = &paragraph.lines[0];
+            let cap = &first.runs[0];
+            // Authored six-em size implies 3.9167 lines; snap to four.
+            assert!((cap.style.size - 43.0 / 0.7).abs() < 0.001);
+            let baseline = first.y + first.baseline - cap.style.baseline_shift;
+            let ink_bottom = baseline + FixedMeasurer.ink_bottom(initial, &cap.style);
+            assert!(layout.blocks[1].y >= ink_bottom);
+            assert!(paragraph.y + paragraph.height >= ink_bottom);
+            let last = paragraph.lines.last().unwrap();
+            assert!(last.y + last.height >= ink_bottom);
+            assert_eq!(layout.blocks[1].lines[0].runs[0].x, 0.0);
+        }
+    }
+
+    #[test]
+    fn floated_initial_placement_ignores_paragraph_alignment() {
+        let layout = synthetic_floated_initial(
+            "ebra.",
+            "Z",
+            "",
+            Some(crate::model::flow::TextAlignment::Right),
+        );
+        let line = &layout.blocks[0].lines[0];
+        assert_eq!(line.runs[0].text, "Z");
+        assert_eq!(line.runs[0].x, 0.0);
+        assert!(line.runs[1].x > line.runs[0].width + 9.0);
+    }
+
+    #[test]
+    fn floated_initial_rejects_nonleading_and_multiple_character_floats() {
+        for (initial, prefix) in [("ZZ", ""), ("Z X", ""), ("Z", "Prefix ")] {
+            let layout = synthetic_floated_initial(" synthetic tail.", initial, prefix, None);
+            let lines = &layout.blocks[0].lines;
+            assert!(
+                lines
+                    .iter()
+                    .flat_map(|line| &line.runs)
+                    .all(|run| run.style.baseline_shift == 0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn typographic_initials_align_cap_heights_not_ascents_for_both_targets() {
+        use crate::model::flow::TypographicInitial;
+        struct DistinctMetrics {
+            initial_ascent: f32,
+        }
+        impl TextMeasurer for DistinctMetrics {
+            fn measure(&self, text: &str, style: &TextStyle) -> TextMetrics {
+                let initial = matches!(style.family, FontFamily::Named(_));
+                TextMetrics {
+                    width: text.chars().count() as f32 * style.size * 0.4,
+                    ascent: style.size * if initial { self.initial_ascent } else { 0.9 },
+                    descent: style.size * 0.3,
+                }
+            }
+            fn cap_height(&self, style: &TextStyle) -> f32 {
+                style.size
+                    * if matches!(style.family, FontFamily::Named(_)) {
+                        0.6
+                    } else {
+                        0.7
+                    }
+            }
+        }
+        for target in [InitialTarget::ThisInline, InitialTarget::FirstLetter] {
+            for initial_ascent in [0.85, 1.1] {
+                for tail in [
+                    "ebra.",
+                    "ebra robots collect synthetic pebbles. Invented words provide several lines of surrounding text for this typography test.",
+                ] {
+                    let mut builder = FlowBuilder::new();
+                    let root = builder.add_node(NodeKind::Document).unwrap();
+                    let paragraph = builder.add_node(NodeKind::Paragraph).unwrap();
+                    let initial = InitialLetter {
+                        target,
+                        sizing: InitialSizing::Typographic(TypographicInitial {
+                            size_per_mille: 3_000,
+                            sink: 3,
+                            margin_top: None,
+                            margin_right: None,
+                            margin_bottom: None,
+                            margin_left: None,
+                        }),
+                    };
+                    if target == InitialTarget::FirstLetter {
+                        let style = builder
+                            .intern_style_input(StyleInput::default().with_author(AuthorStyle {
+                                initial_letter: Some(initial),
+                                ..AuthorStyle::default()
+                            }))
+                            .unwrap();
+                        builder.set_style_input(paragraph, style).unwrap();
+                    }
+                    let inline = builder.add_node(NodeKind::Inline).unwrap();
+                    let style = builder
+                        .intern_style_input(StyleInput::default().with_author(AuthorStyle {
+                            font_family: Some(crate::model::flow::AuthorFontFamily::Named(
+                                "Synthetic Caps".into(),
+                            )),
+                            initial_letter:
+                                (target == InitialTarget::ThisInline).then_some(initial),
+                            ..AuthorStyle::default()
+                        }))
+                        .unwrap();
+                    builder.set_style_input(inline, style).unwrap();
+                    let letter = builder.add_text("Z").unwrap();
+                    builder.append(inline, letter).unwrap();
+                    builder.append(paragraph, inline).unwrap();
+                    let text = builder.add_text(tail).unwrap();
+                    builder.append(paragraph, text).unwrap();
+                    builder.append(root, paragraph).unwrap();
+                    let document = builder.finish().unwrap();
+                    let styles = document.resolve_styles(StyleContextKey::default());
+                    let measurer = DistinctMetrics { initial_ascent };
+                    let layout = layout_flow_document(
+                        &document,
+                        &styles,
+                        &measurer,
+                        &LayoutOptions {
+                            width: 150.0,
+                            body_size: 10.0,
+                            line_spacing: 1.6,
+                            ..LayoutOptions::default()
+                        },
+                    );
+                    let first = &layout.blocks[0].lines[0];
+                    let cap = &first.runs[0];
+                    assert_eq!(cap.text, "Z");
+                    // Body cap height 7; initial cap ratio .6; line height 16.
+                    // Used size = ((3 - 1) * 16 + 7) / .6 = 65, regardless of ascent.
+                    assert!((cap.style.size - 65.0).abs() < 0.001);
+                    let first_baseline = first.y + first.baseline;
+                    let cap_baseline = first_baseline - cap.style.baseline_shift;
+                    assert!((cap_baseline - first_baseline - 32.0).abs() < 0.001);
+                    let cap_top = cap_baseline - measurer.cap_height(&cap.style);
+                    let body_cap_top = first_baseline - 7.0;
+                    assert!((cap_top - body_cap_top).abs() < 0.001);
+                    assert!(cap.style.initial_letter.is_none());
+                    assert_eq!(document.text().as_str(), format!("Z{tail}"));
+                }
+            }
+        }
     }
 
     #[test]
@@ -4116,13 +4796,15 @@ mod tests {
         let style = builder
             .intern_style_input(StyleInput::default().with_author(AuthorStyle {
                 initial_letter: Some(InitialLetter {
-                    size_per_mille: 3_000,
-                    sink: 3,
-                    legacy_float: false,
-                    margin_top: None,
-                    margin_right: None,
-                    margin_bottom: None,
-                    margin_left: None,
+                    target: InitialTarget::ThisInline,
+                    sizing: InitialSizing::Typographic(crate::model::flow::TypographicInitial {
+                        size_per_mille: 3_000,
+                        sink: 3,
+                        margin_top: None,
+                        margin_right: None,
+                        margin_bottom: None,
+                        margin_left: None,
+                    }),
                 }),
                 ..AuthorStyle::default()
             }))
@@ -4169,6 +4851,8 @@ mod tests {
             lines[..3]
                 .iter()
                 .flat_map(|line| &line.runs)
+                // Discretionary hyphens intentionally hang beyond the measure.
+                .filter(|run| !(run.text == "-" && run.range.start == run.range.end))
                 .all(|run| run.x + run.width <= options.width + 0.01)
         );
     }
@@ -4180,14 +4864,16 @@ mod tests {
         let paragraph = builder.add_node(NodeKind::Paragraph).unwrap();
         let style = builder
             .intern_style_input(StyleInput::default().with_author(AuthorStyle {
-                first_letter: Some(InitialLetter {
-                    size_per_mille: 2_000,
-                    sink: 2,
-                    legacy_float: false,
-                    margin_top: None,
-                    margin_right: None,
-                    margin_bottom: None,
-                    margin_left: None,
+                initial_letter: Some(InitialLetter {
+                    target: InitialTarget::FirstLetter,
+                    sizing: InitialSizing::Typographic(crate::model::flow::TypographicInitial {
+                        size_per_mille: 2_000,
+                        sink: 2,
+                        margin_top: None,
+                        margin_right: None,
+                        margin_bottom: None,
+                        margin_left: None,
+                    }),
                 }),
                 ..AuthorStyle::default()
             }))

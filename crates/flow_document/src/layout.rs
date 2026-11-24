@@ -95,6 +95,18 @@ pub struct ImageMetrics {
 pub trait TextMeasurer {
     fn measure(&self, text: &str, style: &TextStyle) -> TextMetrics;
 
+    /// Scaled Latin cap height, distinct from font ascent. Backends should use
+    /// the font's cap-height metric, or an uppercase glyph when it is absent.
+    fn cap_height(&self, style: &TextStyle) -> f32 {
+        style.size * 0.7
+    }
+
+    /// Lowest painted point relative to the baseline (positive downwards).
+    /// The default conservatively uses the font descent.
+    fn ink_bottom(&self, text: &str, style: &TextStyle) -> f32 {
+        self.measure(text, style).descent
+    }
+
     fn measure_image(&self, _url: &str) -> Option<ImageMetrics> {
         None
     }

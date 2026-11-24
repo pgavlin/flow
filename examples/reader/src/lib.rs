@@ -340,7 +340,7 @@ impl App {
                             .as_ref()
                             .map(|session| session.settings().clone())
                             .unwrap_or_default();
-                        settings.rendering.body_fonts = vec!["Charter".into()];
+                        settings.rendering.body_fonts = vec!["Literata".into()];
                         settings.rendering.code_fonts = vec!["Fira Code".into()];
                         let mut session = ReadingSession::new(settings);
                         // No speculative imports or whole-book pagination in this demo.
@@ -569,7 +569,7 @@ impl ApplicationHandler<Event> for App {
         let result = (|| -> Result<Display> {
             let attributes = Window::default_attributes()
                 .with_title("flow demo")
-                .with_inner_size(LogicalSize::new(800, 700));
+                .with_inner_size(LogicalSize::new(632, 840));
             #[cfg(target_arch = "wasm32")]
             let attributes = web::window_attributes(attributes)?;
             let window = Rc::new(event_loop.create_window(attributes)?);
@@ -878,13 +878,13 @@ fn pack_pixels(source: &PixelBuffer, destination: &mut [u32], width: usize) {
 fn demo_fonts() -> Vec<FontResource> {
     // Reuse licensed repository fixtures rather than discovering system fonts.
     [
-        include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/charter.ttf").as_slice(),
-        include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/charter-bold.ttf")
+        include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/literata.ttf").as_slice(),
+        include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/literata-bold.ttf")
             .as_slice(),
-        include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/charter-italic.ttf")
+        include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/literata-italic.ttf")
             .as_slice(),
         include_bytes!(
-            "../../../crates/flow_document/tests/fixtures/fonts/charter-bold-italic.ttf"
+            "../../../crates/flow_document/tests/fixtures/fonts/literata-bold-italic.ttf"
         )
         .as_slice(),
         include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/fira-code.ttf")

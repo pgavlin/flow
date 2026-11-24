@@ -72,7 +72,7 @@ uses one bounded input worker; browser jobs run on the event loop (large imports
 can briefly block it). Generations and engine request IDs reject stale results.
 There is no background prefetch or whole-book pagination, and no async runtime.
 
-Fonts are explicitly supplied from the repository's licensed Charter/Fira Code
+Fonts are explicitly supplied from the repository's licensed Literata/Fira Code
 fixtures, not discovered from the system. See
 [font notices](../../crates/flow_document/tests/fixtures/fonts/README.md). The
 small bundled set is not comprehensive multilingual coverage.

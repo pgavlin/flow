@@ -2857,6 +2857,14 @@ struct RenderMeasurer<'a> {
 }
 
 impl TextMeasurer for RenderMeasurer<'_> {
+    fn ink_bottom(&self, text: &str, style: &TextStyle) -> f32 {
+        self.fonts.borrow_mut().ink_bottom(text, style)
+    }
+
+    fn cap_height(&self, style: &TextStyle) -> f32 {
+        self.fonts.borrow_mut().cap_height(style)
+    }
+
     fn measure(&self, text: &str, style: &TextStyle) -> TextMetrics {
         self.fonts.borrow_mut().measure(text, style)
     }

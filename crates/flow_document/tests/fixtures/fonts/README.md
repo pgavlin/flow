@@ -5,6 +5,7 @@ Tests and the `test-fonts` feature register these fixtures explicitly.
 | Files | Family | License |
 | --- | --- | --- |
 | `charter*.ttf` | Bitstream Charter | Bitstream notice below |
+| `literata*.ttf` | Literata | [OFL](licenses/literata-OFL.txt) |
 | `fira-code.ttf` | Fira Code | [OFL](licenses/firacode-OFL.txt) |
 | `noto-emoji.ttf` | Noto Emoji | [OFL](licenses/notoemoji-OFL.txt) |
 | `noto-sans.ttf` | Noto Sans | [OFL](licenses/notosans-OFL.txt) |
@@ -15,6 +16,9 @@ Tests and the `test-fonts` feature register these fixtures explicitly.
 
 The recorded sources are the practicaltypography.com Charter 210112
 distribution and Google Fonts for Fira Code and Noto.
+The reader example also bundles static Regular, Bold, Italic, and Bold Italic
+Literata fonts from [googlefonts/literata](https://github.com/googlefonts/literata)
+at revision `0c2761b727a1b3a7cffd313c37f0f5163dfc7a63`.
 The notices match the copyright and license records embedded in the font files.
 Embedded versions: Charter 2.000; Fira Code 5.002; Noto Emoji 3.002;
 Noto Sans 2.015; Arabic 2.012; Hebrew 3.001; Devanagari 2.007; JP 2.004-H2.

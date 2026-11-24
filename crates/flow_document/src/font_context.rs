@@ -377,6 +377,14 @@ impl FontSlot {
     }
 }
 impl crate::layout::TextMeasurer for FontSlot {
+    fn ink_bottom(&self, text: &str, style: &crate::layout::TextStyle) -> f32 {
+        self.borrow_mut().ink_bottom(text, style)
+    }
+
+    fn cap_height(&self, style: &crate::layout::TextStyle) -> f32 {
+        self.borrow_mut().cap_height(style)
+    }
+
     fn measure(&self, text: &str, style: &crate::layout::TextStyle) -> crate::layout::TextMetrics {
         self.borrow_mut().measure(text, style)
     }
