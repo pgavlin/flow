@@ -15,8 +15,9 @@ use crate::model::flow::{
     LinkContent, LinkRelation, List, ListItem, ListKind, Math, MathDisplay, MathNotation,
     MediaKind, NodeId, NodeKind, NonEmptyText, Origin, OriginId, Placement, PositiveCssPixels,
     Preformatted, PreformattedKind, Resource, ResourceId, RetainedSourceBundle,
-    RetainedSourceError, RowGroup, SemanticStyleKey, Semantics, SourceArtifactId, SourceDigest,
-    SourceRetention, StyleInput, StyleInputId, Table, UnsupportedObject, UnsupportedReason,
+    RetainedSourceError, RowGroup, RubyAnnotation, SemanticRole, SemanticStyleKey, Semantics,
+    SourceArtifactId, SourceDigest, SourceRetention, StyleInput, StyleInputId, Table,
+    UnsupportedObject, UnsupportedReason,
 };
 use thiserror::Error;
 
@@ -25,6 +26,83 @@ const MAX_TABLE_COLUMNS: u32 = 4_096;
 
 /// Hooks selected explicitly by each format adapter, never public import API.
 pub(in crate::formats) trait LoweringPolicy {
+    /// Lower the whole preformatted container as literal phrasing, retaining
+    /// semantics and targets rather than flattening its first code child.
+    fn preformatted_all_children(&self) -> bool {
+        false
+    }
+
+    /// Preserve inline as well as block media fallback content.
+    fn media_flow_fallback(&self) -> bool {
+        false
+    }
+
+    /// Preserve arbitrary figure flow instead of the legacy image/paragraph subset.
+    fn preserve_figure_flow(&self) -> bool {
+        false
+    }
+
+    /// Adapter-selected flow container with ordinary flow children.
+    fn flow_container(&self, _element: &Element) -> Option<NodeKind> {
+        None
+    }
+
+    /// Adapter-selected phrasing semantics, in addition to the shared baseline.
+    fn inline_semantic(&self, _element: &Element) -> Option<InlineSemantic> {
+        None
+    }
+
+    /// Legacy adapters applied element metadata to both an atom and its spacing
+    /// wrapper. New adapters can keep metadata solely on the semantic atom.
+    fn atomic_spacing_metadata(&self) -> bool {
+        true
+    }
+
+    fn inline_atom(&self, _element: &Element) -> Option<NodeKind> {
+        None
+    }
+
+    fn ruby(&self, _element: &Element) -> bool {
+        false
+    }
+
+    fn link_content(&self, _element: &Element, _has_flow_children: bool) -> LinkContent {
+        LinkContent::Phrasing
+    }
+
+    fn link_relation(&self, _element: &Element) -> LinkRelation {
+        LinkRelation::Ordinary
+    }
+
+    fn roles(&self, _element: &Element) -> Vec<SemanticRole> {
+        Vec::new()
+    }
+
+    /// Interpret a zero row span as extending through its current row group.
+    fn zero_row_span_to_end(&self) -> bool {
+        false
+    }
+
+    fn cell_scope(&self, _element: &Element) -> Option<HeaderScope> {
+        None
+    }
+
+    fn cell_headers(&self, _element: &Element) -> Option<Vec<String>> {
+        None
+    }
+
+    fn bidi(&self, _element: &Element) -> Option<BidiState> {
+        None
+    }
+
+    fn title(&self, _element: &Element) -> Option<String> {
+        None
+    }
+
+    fn math_notation(&self, _element: &Element) -> MathNotation {
+        MathNotation::Tex
+    }
+
     fn math_metadata(&self, _element: &Element) -> Option<(String, MathDisplay)> {
         None
     }
@@ -70,7 +148,14 @@ struct Lowerer<'a> {
 }
 
 #[derive(Default)]
+struct RubySegmentPlan {
+    bases: Vec<Vec<SourceNodeId>>,
+    levels: Vec<Vec<SourceNodeId>>,
+}
+
+#[derive(Default)]
 struct InlineWhitespace {
+    literal: bool,
     has_output: bool,
     at_boundary: bool,
     pending_space: bool,
@@ -138,6 +223,14 @@ impl Lowerer<'_> {
         source_parent: SourceNodeId,
     ) -> Result<(), LoweringError> {
         let children = self.tree.get(source_parent).unwrap().children().to_vec();
+        self.append_flow_nodes(parent, children)
+    }
+
+    fn append_flow_nodes(
+        &mut self,
+        parent: NodeId,
+        children: Vec<SourceNodeId>,
+    ) -> Result<(), LoweringError> {
         let mut paragraph = None;
         let mut whitespace = InlineWhitespace {
             at_boundary: true,
@@ -205,7 +298,7 @@ impl Lowerer<'_> {
             return self
                 .node(
                     NodeKind::Math(Math {
-                        notation: MathNotation::Tex,
+                        notation: self.policy.math_notation(self.element(source).unwrap()),
                         source: tex,
                         display: MathDisplay::Block,
                     }),
@@ -213,6 +306,23 @@ impl Lowerer<'_> {
                     None,
                 )
                 .map(Some);
+        }
+        if self.is_flow_link(source) {
+            let element = self.element(source).unwrap();
+            let link = Link {
+                content: LinkContent::Flow,
+                destination: destination(element.attribute(None, "href").unwrap()),
+                relation: self.policy.link_relation(element),
+                title: self.policy.title(element),
+            };
+            let node = self.node(NodeKind::Link(link), source, Some(SemanticStyleKey::Link))?;
+            self.append_flow_children(node, source)?;
+            return Ok(Some(node));
+        }
+        if let Some(kind) = self.policy.flow_container(self.element(source).unwrap()) {
+            let node = self.node(kind, source, None)?;
+            self.append_flow_children(node, source)?;
+            return Ok(Some(node));
         }
         let node = match name {
             "p" => {
@@ -374,6 +484,19 @@ impl Lowerer<'_> {
                 message: "root-level code was normalized as a preformatted block".into(),
             });
         }
+        if self.policy.preformatted_all_children() {
+            let mut whitespace = InlineWhitespace {
+                literal: true,
+                at_boundary: true,
+                ..Default::default()
+            };
+            for child in self.tree.get(source).unwrap().children().to_vec() {
+                if let Some(child) = self.lower_inline(child, &mut whitespace)? {
+                    self.builder.append(node, child)?;
+                }
+            }
+            return Ok(node);
+        }
         let text_source = code.unwrap_or(source);
         let mut value = String::new();
         self.collect_text(text_source, &mut value);
@@ -506,6 +629,7 @@ impl Lowerer<'_> {
         });
 
         let mut has_fallback = false;
+        let mut fallback = Vec::new();
         for child in children {
             match self.element_name(child) {
                 Some("source") => continue,
@@ -521,12 +645,20 @@ impl Lowerer<'_> {
                 }
                 _ => {}
             }
-            if self.is_block(child)
+            if self.policy.media_flow_fallback() {
+                if !self.source_is_ignorable_whitespace(child) {
+                    fallback.push(child);
+                }
+            } else if self.is_block(child)
                 && let Some(child) = self.lower_flow(child)?
             {
                 self.builder.append(object, child)?;
                 has_fallback = true;
             }
+        }
+        if self.policy.media_flow_fallback() {
+            has_fallback = !fallback.is_empty();
+            self.append_flow_nodes(object, fallback)?;
         }
         if !has_fallback && let Some(title) = title {
             let paragraph = self.generated_node(
@@ -592,6 +724,8 @@ impl Lowerer<'_> {
             self.append_flow_children(caption_node, caption)?;
             self.builder.append(table, caption_node)?;
         }
+        let mut header_targets = HashMap::new();
+        let mut pending_headers = Vec::new();
         for (group_source, kind, rows) in groups {
             let group = if let Some(group_source) = group_source {
                 self.node(NodeKind::RowGroup(kind), group_source, None)?
@@ -622,29 +756,61 @@ impl Lowerer<'_> {
                     let column_span = self.table_span(cell_source, "colspan", MAX_TABLE_COLUMNS)?;
                     let remaining_rows = u32::try_from(row_count - row_index).unwrap_or(u32::MAX);
                     let row_span = self.table_span(cell_source, "rowspan", remaining_rows)?;
-                    let cell = self.node(
-                        NodeKind::Cell(Cell {
-                            kind: if is_header {
-                                CellKind::Header
-                            } else {
-                                CellKind::Data
-                            },
-                            column_start: 0,
-                            column_span,
-                            row_span,
-                            scope: (is_header && kind == RowGroup::Head)
-                                .then_some(HeaderScope::Column),
-                            explicit_headers: None,
-                        }),
-                        cell_source,
-                        None,
-                    )?;
+                    let metadata = Cell {
+                        kind: if is_header {
+                            CellKind::Header
+                        } else {
+                            CellKind::Data
+                        },
+                        column_start: 0,
+                        column_span,
+                        row_span,
+                        scope: self
+                            .policy
+                            .cell_scope(self.element(cell_source).unwrap())
+                            .or_else(|| {
+                                (is_header && kind == RowGroup::Head).then_some(HeaderScope::Column)
+                            }),
+                        explicit_headers: None,
+                    };
+                    let cell = self.node(NodeKind::Cell(metadata.clone()), cell_source, None)?;
+                    let element = self.element(cell_source).unwrap();
+                    if let Some(id) = element.attribute(None, "id") {
+                        header_targets
+                            .entry(id.to_owned())
+                            .or_insert(is_header.then_some(cell));
+                    }
+                    if let Some(headers) = self.policy.cell_headers(element) {
+                        pending_headers.push((cell, cell_source, headers, metadata));
+                    }
                     self.append_flow_children(cell, cell_source)?;
                     self.builder.append(row, cell)?;
                 }
                 self.builder.append(group, row)?;
             }
             self.builder.append(table, group)?;
+        }
+        for (cell, source, names, mut metadata) in pending_headers {
+            let mut headers = Vec::new();
+            let mut seen = HashSet::new();
+            for name in names {
+                if let Some(header) = header_targets.get(&name).copied().flatten()
+                    && header != cell
+                    && seen.insert(header)
+                {
+                    headers.push(header);
+                } else {
+                    let origin = self.origin(source)?;
+                    self.diagnostics.push(Diagnostic {
+                        severity: DiagnosticSeverity::Warning,
+                        kind: DiagnosticKind::InvalidTableHeaderReference,
+                        origin: Some(origin),
+                        message: format!("table header reference '{name}' was missing, self-referencing, or repeated and was ignored"),
+                    });
+                }
+            }
+            metadata.explicit_headers = Some(headers);
+            self.builder.set_kind(cell, NodeKind::Cell(metadata))?;
         }
         Ok(table)
     }
@@ -660,10 +826,17 @@ impl Lowerer<'_> {
             .and_then(|element| element.attribute(None, attribute))
             .map(str::to_owned);
         let parsed = raw.as_deref().and_then(|value| value.parse::<u32>().ok());
-        let requested = parsed.unwrap_or(1);
+        let interpreted = parsed.map(|value| {
+            if attribute == "rowspan" && value == 0 && self.policy.zero_row_span_to_end() {
+                maximum.max(1)
+            } else {
+                value
+            }
+        });
+        let requested = interpreted.unwrap_or(1);
         let normalized = requested.clamp(1, maximum.max(1));
         if let Some(raw) = raw
-            && parsed != Some(normalized)
+            && interpreted != Some(normalized)
         {
             let origin = self.origin(source)?;
             self.diagnostics.push(Diagnostic {
@@ -678,6 +851,36 @@ impl Lowerer<'_> {
 
     fn lower_figure(&mut self, source: SourceNodeId) -> Result<NodeId, LoweringError> {
         let figure = self.node(NodeKind::Figure, source, None)?;
+        if self.policy.preserve_figure_flow() {
+            let mut pending = Vec::new();
+            let mut caption_seen = false;
+            for child in self.tree.get(source).unwrap().children().to_vec() {
+                if self.element_name(child) == Some("figcaption") {
+                    self.append_flow_nodes(figure, std::mem::take(&mut pending))?;
+                    let kind = if caption_seen {
+                        let origin = self.origin(child)?;
+                        self.diagnostics.push(Diagnostic {
+                            severity: DiagnosticSeverity::Warning,
+                            kind: DiagnosticKind::InvalidChild,
+                            origin: Some(origin),
+                            message: "additional figure caption was retained as ordinary flow"
+                                .into(),
+                        });
+                        NodeKind::Flow
+                    } else {
+                        NodeKind::Caption
+                    };
+                    let caption = self.node(kind, child, None)?;
+                    self.append_flow_children(caption, child)?;
+                    self.builder.append(figure, caption)?;
+                    caption_seen = true;
+                } else {
+                    pending.push(child);
+                }
+            }
+            self.append_flow_nodes(figure, pending)?;
+            return Ok(figure);
+        }
         for child in self.tree.get(source).unwrap().children().to_vec() {
             let lowered = match self.element_name(child) {
                 Some("figcaption") => {
@@ -702,6 +905,7 @@ impl Lowerer<'_> {
             .attribute(None, "src")
             .unwrap_or_default()
             .to_owned();
+        let title = self.policy.title(element);
         let alternative = element.attribute(None, "alt").map(str::to_owned);
         let width = element.attribute(None, "width").map(str::to_owned);
         let height = element.attribute(None, "height").map(str::to_owned);
@@ -740,7 +944,7 @@ impl Lowerer<'_> {
             NodeKind::Image(Image {
                 resource,
                 alternative,
-                title: None,
+                title,
                 intrinsic_size,
             }),
             source,
@@ -764,7 +968,17 @@ impl Lowerer<'_> {
         parent: NodeId,
         source_parent: SourceNodeId,
     ) -> Result<(), LoweringError> {
+        self.append_inline_children_with_mode(parent, source_parent, false)
+    }
+
+    fn append_inline_children_with_mode(
+        &mut self,
+        parent: NodeId,
+        source_parent: SourceNodeId,
+        literal: bool,
+    ) -> Result<(), LoweringError> {
         let mut whitespace = InlineWhitespace {
+            literal,
             at_boundary: true,
             ..InlineWhitespace::default()
         };
@@ -784,7 +998,15 @@ impl Lowerer<'_> {
         let kind = self.tree.get(source).unwrap().kind().clone();
         match kind {
             SourceNodeKind::Text(value) | SourceNodeKind::Cdata(value) => {
-                let normalized = normalize_inline_text(&value, whitespace);
+                let normalized = if whitespace.literal {
+                    if !value.is_empty() {
+                        whitespace.has_output = true;
+                        whitespace.at_boundary = value.ends_with('\n');
+                    }
+                    value
+                } else {
+                    normalize_inline_text(&value, whitespace)
+                };
                 if normalized.is_empty() {
                     return Ok(None);
                 }
@@ -805,7 +1027,7 @@ impl Lowerer<'_> {
                 if let Some((tex, display)) = self.math_metadata(source) {
                     let math = self.node(
                         NodeKind::Math(Math {
-                            notation: MathNotation::Tex,
+                            notation: self.policy.math_notation(&element),
                             source: tex,
                             display,
                         }),
@@ -815,6 +1037,24 @@ impl Lowerer<'_> {
                     return self
                         .inline_atomic_with_pending(source, math, whitespace)
                         .map(Some);
+                }
+                if let Some(kind) = self.policy.inline_atom(&element) {
+                    let invisible = matches!(kind, NodeKind::BreakOpportunity(_));
+                    let atom = self.node(kind, source, None)?;
+                    if invisible {
+                        return Ok(Some(atom));
+                    }
+                    return self
+                        .inline_atomic_with_pending(source, atom, whitespace)
+                        .map(Some);
+                }
+                if self.policy.ruby(&element) {
+                    if let Some(ruby) = self.lower_ruby(source, whitespace.literal)? {
+                        return self
+                            .inline_atomic_with_pending(source, ruby, whitespace)
+                            .map(Some);
+                    }
+                    return self.lower_transparent_inline(source, whitespace);
                 }
                 if name == "img" {
                     let image = self.lower_image(source)?;
@@ -829,7 +1069,7 @@ impl Lowerer<'_> {
                     return self.node(NodeKind::HardBreak, source, None).map(Some);
                 }
 
-                let (kind, style) = match name.as_str() {
+                let (mut kind, style) = match name.as_str() {
                     "a" => {
                         let Some(href) = element.attribute(None, "href") else {
                             return self.lower_transparent_inline(source, whitespace);
@@ -838,8 +1078,8 @@ impl Lowerer<'_> {
                             NodeKind::Link(Link {
                                 content: LinkContent::Phrasing,
                                 destination: destination(href),
-                                relation: LinkRelation::Ordinary,
-                                title: None,
+                                relation: self.policy.link_relation(&element),
+                                title: self.policy.title(&element),
                             }),
                             Some(SemanticStyleKey::Link),
                         )
@@ -859,15 +1099,214 @@ impl Lowerer<'_> {
                     ),
                     _ => (NodeKind::Inline, None),
                 };
+                if let Some(semantic) = self.policy.inline_semantic(&element) {
+                    kind = NodeKind::InlineSemantic(semantic);
+                }
                 let node = self.node(kind, source, style)?;
+                let literal_block = whitespace.literal && name != "code" && self.is_block(source);
+                if literal_block {
+                    self.append_literal_break(node, source, whitespace)?;
+                }
                 for child in self.tree.get(source).unwrap().children().to_vec() {
                     if let Some(child) = self.lower_inline(child, whitespace)? {
                         self.builder.append(node, child)?;
                     }
                 }
+                if literal_block {
+                    self.append_literal_break(node, source, whitespace)?;
+                }
                 Ok(Some(node))
             }
         }
+    }
+
+    fn append_literal_break(
+        &mut self,
+        parent: NodeId,
+        source: SourceNodeId,
+        whitespace: &mut InlineWhitespace,
+    ) -> Result<(), LoweringError> {
+        if whitespace.has_output && !whitespace.at_boundary {
+            let text = self.builder.add_text("\n")?;
+            let origin = self.origin(source)?;
+            self.builder.set_origin(text, origin)?;
+            self.builder.append(parent, text)?;
+            whitespace.at_boundary = true;
+        }
+        Ok(())
+    }
+
+    /// Build a normalized ruby grid only when coverage is unambiguous. Malformed
+    /// grids remain readable phrasing with a diagnostic, never invalid IR.
+    fn lower_ruby(
+        &mut self,
+        source: SourceNodeId,
+        literal: bool,
+    ) -> Result<Option<NodeId>, LoweringError> {
+        let mut plans = Vec::new();
+        let mut plan = RubySegmentPlan::default();
+        let mut implicit_base = false;
+        let mut valid = true;
+        for child in self.tree.get(source).unwrap().children().iter().copied() {
+            match self.element_name(child) {
+                Some("rt" | "rp") => {
+                    if plan.levels.is_empty() {
+                        plan.levels.push(Vec::new());
+                    }
+                    plan.levels[0].push(child);
+                    implicit_base = false;
+                }
+                Some("rtc") => {
+                    let level = self
+                        .tree
+                        .get(child)
+                        .unwrap()
+                        .children()
+                        .iter()
+                        .copied()
+                        .filter(|child| !self.source_is_ignorable_whitespace(*child))
+                        .collect::<Vec<_>>();
+                    valid &= level
+                        .iter()
+                        .all(|child| matches!(self.element_name(*child), Some("rt" | "rp")));
+                    plan.levels.push(level);
+                    implicit_base = false;
+                }
+                _ if self.source_is_ignorable_whitespace(child) => {
+                    if implicit_base && plan.levels.is_empty() {
+                        plan.bases.last_mut().unwrap().push(child);
+                    }
+                }
+                _ => {
+                    if !plan.levels.is_empty() {
+                        plans.push(std::mem::take(&mut plan));
+                    }
+                    if self.element_name(child) == Some("rb") {
+                        plan.bases.push(vec![child]);
+                        implicit_base = false;
+                    } else if implicit_base {
+                        plan.bases.last_mut().unwrap().push(child);
+                    } else {
+                        plan.bases.push(vec![child]);
+                        implicit_base = true;
+                    }
+                }
+            }
+        }
+        if !plan.bases.is_empty() || !plan.levels.is_empty() {
+            plans.push(plan);
+        }
+        valid &= !plans.is_empty()
+            && plans.iter().all(|plan| {
+                !plan.bases.is_empty()
+                    && plan.levels.iter().all(|level| {
+                        let mut coverage = 0usize;
+                        let mut previous_fallback = false;
+                        let mut has_annotation = false;
+                        for child in level {
+                            if self.element_name(*child) == Some("rp") {
+                                if previous_fallback {
+                                    return false;
+                                }
+                                previous_fallback = true;
+                            } else {
+                                previous_fallback = false;
+                                has_annotation = true;
+                                let span = self
+                                    .element(*child)
+                                    .unwrap()
+                                    .attribute(None, "rbspan")
+                                    .map_or(Some(1), |span| span.parse::<usize>().ok());
+                                let Some(span) =
+                                    span.filter(|span| *span > 0 && *span <= plan.bases.len())
+                                else {
+                                    return false;
+                                };
+                                coverage += span;
+                            }
+                        }
+                        has_annotation && coverage == plan.bases.len()
+                    })
+            });
+        if !valid {
+            let origin = self.origin(source)?;
+            self.diagnostics.push(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                kind: DiagnosticKind::InvalidRubyStructure,
+                origin: Some(origin),
+                message:
+                    "ruby with ambiguous base/annotation coverage was retained as readable phrasing"
+                        .into(),
+            });
+            return Ok(None);
+        }
+        let ruby = self.node(NodeKind::Ruby, source, None)?;
+        for plan in plans {
+            let segment = self.structural_wrapper(NodeKind::RubySegment, source)?;
+            let bases = self.structural_wrapper(NodeKind::RubyBaseLevel, source)?;
+            for base_sources in plan.bases {
+                let base_source = base_sources[0];
+                let explicit = self.element_name(base_source) == Some("rb");
+                let base = if explicit {
+                    self.node(NodeKind::RubyBase, base_source, None)?
+                } else {
+                    self.structural_wrapper(NodeKind::RubyBase, base_source)?
+                };
+                if explicit {
+                    self.append_inline_children_with_mode(base, base_source, literal)?;
+                } else {
+                    let mut whitespace = InlineWhitespace {
+                        literal,
+                        at_boundary: true,
+                        ..Default::default()
+                    };
+                    for child in base_sources {
+                        if let Some(child) = self.lower_inline(child, &mut whitespace)? {
+                            self.builder.append(base, child)?;
+                        }
+                    }
+                }
+                self.builder.append(bases, base)?;
+            }
+            self.builder.append(segment, bases)?;
+            for level in plan.levels {
+                let annotations = self.structural_wrapper(NodeKind::RubyAnnotationLevel, source)?;
+                for child in level {
+                    let kind = if self.element_name(child) == Some("rp") {
+                        NodeKind::RubyFallback
+                    } else {
+                        let span = self
+                            .element(child)
+                            .unwrap()
+                            .attribute(None, "rbspan")
+                            .and_then(|span| span.parse().ok())
+                            .unwrap_or(1);
+                        NodeKind::RubyAnnotation(RubyAnnotation {
+                            base_span: NonZeroU32::new(span).unwrap(),
+                        })
+                    };
+                    let annotation = self.node(kind, child, None)?;
+                    self.append_inline_children_with_mode(annotation, child, literal)?;
+                    self.builder.append(annotations, annotation)?;
+                }
+                self.builder.append(segment, annotations)?;
+            }
+            self.builder.append(ruby, segment)?;
+        }
+        Ok(Some(ruby))
+    }
+
+    /// Structural wrappers share source provenance but must not claim its
+    /// anchors or apply its element metadata repeatedly.
+    fn structural_wrapper(
+        &mut self,
+        kind: NodeKind,
+        source: SourceNodeId,
+    ) -> Result<NodeId, LoweringError> {
+        let node = self.builder.add_node(kind)?;
+        let origin = self.origin(source)?;
+        self.builder.set_origin(node, origin)?;
+        Ok(node)
     }
 
     fn inline_atomic_with_pending(
@@ -877,7 +1316,11 @@ impl Lowerer<'_> {
         whitespace: &mut InlineWhitespace,
     ) -> Result<NodeId, LoweringError> {
         let node = if whitespace.pending_space {
-            let wrapper = self.node(NodeKind::Inline, source, None)?;
+            let wrapper = if self.policy.atomic_spacing_metadata() {
+                self.node(NodeKind::Inline, source, None)?
+            } else {
+                self.structural_wrapper(NodeKind::Inline, source)?
+            };
             let space = self.builder.add_text(" ")?;
             let origin = self.origin(source)?;
             self.builder.set_origin(space, origin)?;
@@ -953,7 +1396,10 @@ impl Lowerer<'_> {
         let language = element
             .attribute(None, "lang")
             .or_else(|| element.attribute(Some(XML_NAMESPACE), "lang"));
-        let mut semantics = Semantics::default();
+        let mut semantics = Semantics {
+            roles: self.policy.roles(element),
+            ..Semantics::default()
+        };
         if let Some(language) = language {
             semantics.language = if language.is_empty() {
                 LanguageOverride::Unknown
@@ -973,20 +1419,22 @@ impl Lowerer<'_> {
             self.builder.set_semantics(node, semantics)?;
         }
 
-        let bidi = element
-            .attribute(None, "dir")
-            .and_then(|direction| match direction {
-                "ltr" => Some(BidiState {
-                    direction: BaseDirection::LeftToRight,
-                    mode: BidiMode::Normal,
-                }),
-                "rtl" => Some(BidiState {
-                    direction: BaseDirection::RightToLeft,
-                    mode: BidiMode::Normal,
-                }),
-                "auto" => Some(BidiState::default()),
-                _ => None,
-            });
+        let bidi = self.policy.bidi(element).or_else(|| {
+            element
+                .attribute(None, "dir")
+                .and_then(|direction| match direction {
+                    "ltr" => Some(BidiState {
+                        direction: BaseDirection::LeftToRight,
+                        mode: BidiMode::Normal,
+                    }),
+                    "rtl" => Some(BidiState {
+                        direction: BaseDirection::RightToLeft,
+                        mode: BidiMode::Normal,
+                    }),
+                    "auto" => Some(BidiState::default()),
+                    _ => None,
+                })
+        });
         let author_style = self.author_styles[source.index()].clone();
         if semantic_style.is_some() || bidi.is_some() || !author_style.is_empty() {
             let style = self.style(semantic_style, bidi, author_style)?;
@@ -1165,7 +1613,37 @@ impl Lowerer<'_> {
             .and_then(|element| self.policy.element_name(element))
     }
 
+    fn is_flow_link(&self, source: SourceNodeId) -> bool {
+        if self.element_name(source) != Some("a") {
+            return false;
+        }
+        let element = self.element(source).unwrap();
+        element.attribute(None, "href").is_some()
+            && self.policy.link_content(
+                element,
+                self.tree
+                    .get(source)
+                    .unwrap()
+                    .children()
+                    .iter()
+                    // Root-level code has a legacy preformatted convenience,
+                    // but code inside a transparent link remains phrasing.
+                    .any(|child| {
+                        self.element_name(*child) != Some("code") && self.is_block(*child)
+                    }),
+            ) == LinkContent::Flow
+    }
+
     fn is_block(&self, source: SourceNodeId) -> bool {
+        if self.is_flow_link(source) {
+            return true;
+        }
+        if self
+            .element(source)
+            .is_some_and(|element| self.policy.flow_container(element).is_some())
+        {
+            return true;
+        }
         if self
             .math_metadata(source)
             .is_some_and(|(_, display)| display == MathDisplay::Block)
@@ -1291,7 +1769,7 @@ fn has_uri_scheme(value: &str) -> bool {
         })
 }
 
-fn percent_decode(value: &str) -> String {
+pub(in crate::formats) fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;

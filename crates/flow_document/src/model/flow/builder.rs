@@ -329,6 +329,20 @@ impl FlowBuilder {
         self.insert_draft(kind, None)
     }
 
+    /// Completes non-text draft metadata after resolving forward references.
+    /// The normal finalization checks still validate grammar and referenced IDs.
+    pub(crate) fn set_kind(&mut self, node: NodeId, kind: NodeKind) -> Result<(), BuildError> {
+        if matches!(kind, NodeKind::Text) {
+            return Err(BuildError::TextLiteralRequired);
+        }
+        let draft = self.node_mut(node)?;
+        if matches!(draft.kind, NodeKind::Text) {
+            return Err(BuildError::TextLiteralRequired);
+        }
+        draft.kind = kind;
+        Ok(())
+    }
+
     /// Adds a text leaf whose literal has already undergone importer whitespace normalization.
     pub fn add_text(&mut self, literal: impl Into<String>) -> Result<NodeId, BuildError> {
         self.insert_draft(NodeKind::Text, Some(literal.into().into_boxed_str()))

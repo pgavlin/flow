@@ -37,14 +37,54 @@ The optional `web-html` adapter parses host-supplied HTML5 with a native
 Readability implementation, performs article extraction and normalization, and
 lowers its DOM directly through this boundary. It returns article metadata
 separately and performs no networking. This importer is experimental: its input
-bytes are bounded, but third-party DOM allocation precedes node/depth checks.
+bytes are bounded, and a budgeted HTML5 tree sink checks node allocations,
+logical depth (including detached template fragments), attributes, accounted DOM
+storage, and sink operations before mutation. Rejected creations use inert named
+handles until the current bounded tokenizer batch finishes; failed trees never
+become import results. Subtree reparenting cannot bypass depth checks. These are
+DOM construction budgets, not a process-wide allocator quota: tokenizer scratch,
+allocator capacity/overhead, and native extraction's internal execution time are
+not directly interruptible by this boundary.
+Before extraction it preserves TeX and MathML, math scripts, static checkbox
+state, and legacy anchor targets. Explicitly paired visual/semantic formula
+representations become one math node. Links resolve against the HTML base URL,
+including fragment-only references, without applying relative bases twice.
+Image links retain their transparent link semantics and metadata; figure
+lowering preserves arbitrary flow content instead of only direct images and
+paragraphs. Preformatted content retains literal whitespace, explicit breaks,
+links, and anchors instead of flattening the first code child. Media placeholders
+retain inline and block fallback content. Referenced local notes use bounded
+parsed-node snapshots rather than an unbudgeted HTML reparse. Restoration checks
+total arena capacity and depth before copying, and follows retained references
+transitively. Explicitly hidden descendants and remote note bodies are not
+resurrected; inline visibility parsing handles CSS comments, escapes, and
+`!important` priority without attempting stylesheet layout. Missing targets are
+diagnosed.
+After lazy-image recovery, `srcset`-only images receive a deterministic
+single-resource fallback, with lost responsive alternatives diagnosed. Rejected
+image resources retain their alternative text. Display math and other flow
+content are split out of phrasing wrappers rather than flattened or inserted into
+invalid inline IR. Layout-table conversion requires explicit presentation intent;
+nesting and paragraph-containing cells are not sufficient evidence.
+Adapter policy hooks preserve ruby grids, inline roles, titles, sections,
+checkboxes, optional breaks, bidi isolation/overrides, inline metadata, note
+relationships/roles, flow-content links, table scope/header associations, and
+row-group-spanning zero row spans without changing the legacy XML adapters'
+default lowering behavior.
+Malformed ruby and specialized list/table structures recover to readable content
+with diagnostics. Original-element identities survive extraction and repair
+carriers without inventing serialized ranges. A pinned synthetic Readability
+fixture subset runs offline; an external-corpus evaluator separates native
+extraction differences from pipeline differences. Remaining hardening includes
+global allocation accounting and interruptible extraction-work quotas; the
+separate responsive-image IR design does not block single-resource import.
 
 Constructed trees can retain original node identities, omit unknown serialized
 ranges, and associate generated nodes with their original constructs. HTML
 provenance refers to the original `text/html` source, never a normalized
 serialization. Default construction budgets bound nodes, depth, attributes, and
-text/attribute data while adapting a DOM; a future parser integration must also
-bound its own input and allocations. XML retains its existing lexical limits.
+text/attribute data while adapting a DOM; each parser integration must also
+bound its own input and construction work. XML retains its existing lexical limits.
 Publication resource resolution remains in `flow_publication`.
 
 With `render`, text shaping and paragraph composition produce continuous

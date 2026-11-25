@@ -22,7 +22,7 @@ required-features = ["render"]
 [features]
 default = []
 # Experimental host-fed web article extraction (no networking).
-web-html = ["dep:dom_smoothie", "dep:url"]
+web-html = ["dep:dom_smoothie", "dep:html5ever", "dep:url"]
 render = [
     "dep:flow_cache",
     "serde",
@@ -51,6 +51,7 @@ workspace = true
 flow_cache = { workspace = true, optional = true }
 blake3 = "1"
 dom_smoothie = { version = "0.20", optional = true }
+html5ever = { version = "0.40.1", optional = true }
 url = { version = "2.5", optional = true }
 cssparser = "0.38"
 hyphenation = { version = "0.8.4", features = ["embed_en-us"] }
@@ -83,7 +84,9 @@ tree-sitter-highlight = "=0.27.1"
 unicode-script = { version = "0.5.8", optional = true }
 
 [dev-dependencies]
+percent-encoding = "2"
 png = "0.18"
+serde_json = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tree-sitter-bash = "=0.25.1"

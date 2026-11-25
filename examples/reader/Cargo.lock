@@ -732,6 +732,7 @@ dependencies = [
  "fontique",
  "harfrust",
  "hashbrown 0.16.1",
+ "html5ever",
  "hyphenation",
  "image",
  "language-tags",
