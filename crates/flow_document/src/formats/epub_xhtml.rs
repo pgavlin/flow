@@ -4,14 +4,15 @@
 
 use thiserror::Error;
 
+use super::html::{lowering, source::SourceSyntax};
+
 use super::xhtml::{
     SourceNodeId, XhtmlDiagnostic, XhtmlElement, XhtmlParseOptions, XhtmlPrepareError,
     XhtmlProfileError, XhtmlSourceNode, XhtmlSourceNodeKind, XhtmlSourceTree, XhtmlTreeProfile,
-    lowering, prepare_with_options,
+    prepare_with_options,
 };
 use crate::model::flow::{
-    BuildError, DocumentReference, ImportOutcome, MathDisplay, PreformattedKind,
-    RetainedSourceError, SourceRetention,
+    BuildError, DocumentReference, ImportOutcome, MathDisplay, RetainedSourceError, SourceRetention,
 };
 
 mod css;
@@ -124,12 +125,13 @@ impl lowering::LoweringPolicy for EpubXhtmlProfile {
         Some((tex, display))
     }
 
-    fn code_kind(&self, language: Option<&str>) -> PreformattedKind {
-        if language == Some("mermaid") {
-            PreformattedKind::MermaidSource
-        } else {
-            PreformattedKind::SourceCode
-        }
+    fn element_name<'a>(&self, element: &'a XhtmlElement) -> Option<&'a str> {
+        // Preserve the existing XML import contract, including foreign wrappers.
+        Some(element.name().local())
+    }
+
+    fn code_metadata(&self, element: &XhtmlElement) -> crate::model::flow::Preformatted {
+        super::flow_xhtml::code_metadata(element)
     }
 }
 
@@ -161,14 +163,15 @@ pub fn import(source: &str, options: EpubXhtmlOptions) -> Result<ImportOutcome, 
     };
     let outcome = {
         let _span = crate::telemetry::phase_span!("flow.flow.lower", format = "xhtml");
-        lowering::lower_prepared(
+        lowering::lower_tree(
             source,
-            prepared,
+            prepared.tree,
             &author_styles,
             lowering::LoweringOptions {
                 resource_base: options.resource_base,
                 identity: options.identity,
                 retention: options.retention,
+                syntax: SourceSyntax::Xhtml,
             },
             content_root,
             &EpubXhtmlProfile,

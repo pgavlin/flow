@@ -20,7 +20,8 @@ use crate::{
     syntax::SyntaxKind,
 };
 
-pub const SEMANTIC_CODEC_VERSION: u32 = 1;
+// Version 2 adds HTML provenance to the semantic origin vocabulary.
+pub const SEMANTIC_CODEC_VERSION: u32 = 2;
 pub const COMPOSITION_CODEC_VERSION: u32 = 2;
 pub const PAGINATION_CODEC_VERSION: u32 = 1;
 
@@ -512,6 +513,11 @@ fn direct_origin_source_end(origin: &Origin) -> Option<(SourceArtifactId, usize)
             source,
             serialized_range,
             ..
+        }
+        | Origin::Html {
+            source,
+            serialized_range,
+            ..
         } => Some((
             *source,
             serialized_range.as_ref().map_or(0, |range| range.end),
@@ -529,7 +535,9 @@ fn source_index(document: &FlowDocument, source: SourceArtifactId) -> Option<usi
 fn origin_source(document: &FlowDocument, mut origin: OriginId) -> Option<SourceArtifactId> {
     for _ in 0..document.origins().len() {
         match document.get_origin(origin)? {
-            Origin::Markdown { source, .. } | Origin::Xhtml { source, .. } => return Some(*source),
+            Origin::Markdown { source, .. }
+            | Origin::Xhtml { source, .. }
+            | Origin::Html { source, .. } => return Some(*source),
             Origin::Generated {
                 related: Some(related),
                 ..
@@ -970,8 +978,14 @@ mod tests {
             decode_semantic(&corrupted, source, limits).unwrap_err(),
             CacheCodecError::Checksum
         );
+        let mut previous = bytes.clone();
+        previous[12..16].copy_from_slice(&(SEMANTIC_CODEC_VERSION - 1).to_le_bytes());
+        assert_eq!(
+            decode_semantic(&previous, source, limits).unwrap_err(),
+            CacheCodecError::Version
+        );
         let mut future = bytes.clone();
-        future[12..16].copy_from_slice(&2u32.to_le_bytes());
+        future[12..16].copy_from_slice(&(SEMANTIC_CODEC_VERSION + 1).to_le_bytes());
         assert_eq!(
             decode_semantic(&future, source, limits).unwrap_err(),
             CacheCodecError::Version

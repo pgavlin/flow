@@ -9,6 +9,7 @@ use crate::model::flow::{DocumentReference, ImportOutcome, SourceRetention};
 
 pub mod epub_xhtml;
 pub mod flow_xhtml;
+mod html;
 #[path = "markdown_flow.rs"]
 pub mod markdown;
 pub mod xhtml;

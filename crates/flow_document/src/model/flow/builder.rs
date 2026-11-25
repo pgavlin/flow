@@ -498,6 +498,11 @@ impl FlowBuilder {
                 source,
                 serialized_range,
                 ..
+            }
+            | Origin::Html {
+                source,
+                serialized_range,
+                ..
             } => {
                 self.source_artifact(*source)?;
                 if let Some(range) = serialized_range {
@@ -535,7 +540,9 @@ impl FlowBuilder {
 
     fn origin_source(&self, origin: &Origin) -> Option<SourceArtifactId> {
         match origin {
-            Origin::Markdown { source, .. } | Origin::Xhtml { source, .. } => Some(*source),
+            Origin::Markdown { source, .. }
+            | Origin::Xhtml { source, .. }
+            | Origin::Html { source, .. } => Some(*source),
             Origin::Generated { .. } => None,
         }
     }

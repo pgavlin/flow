@@ -5,9 +5,11 @@
 
 use thiserror::Error;
 
+use super::html::{lowering, source::SourceSyntax};
+
 use super::xhtml::{
     XhtmlDiagnostic, XhtmlElement, XhtmlPrepareError, XhtmlProfileError, XhtmlSourceTree,
-    XhtmlTreeProfile, lowering, prepare,
+    XhtmlTreeProfile, prepare,
 };
 use crate::model::flow::{
     AuthorStyle, BuildError, DocumentReference, ImportOutcome, MathDisplay, PreformattedKind,
@@ -85,12 +87,33 @@ impl lowering::LoweringPolicy for StrictFlowProfile {
         Some((tex, display))
     }
 
-    fn code_kind(&self, language: Option<&str>) -> PreformattedKind {
-        if language == Some("mermaid") {
+    fn element_name<'a>(&self, element: &'a XhtmlElement) -> Option<&'a str> {
+        // Preserve the existing XML import contract, including foreign wrappers.
+        Some(element.name().local())
+    }
+
+    fn code_metadata(&self, element: &XhtmlElement) -> crate::model::flow::Preformatted {
+        code_metadata(element)
+    }
+}
+
+/// Source-preserving code conventions explicitly selected by both XML adapters.
+pub(super) fn code_metadata(element: &XhtmlElement) -> crate::model::flow::Preformatted {
+    let language = element
+        .attribute(None, "class")
+        .and_then(|class| {
+            class
+                .split_ascii_whitespace()
+                .find_map(|token| token.strip_prefix("language-"))
+        })
+        .filter(|language| !language.is_empty());
+    crate::model::flow::Preformatted {
+        language: language.map(str::to_owned),
+        content_kind: if language == Some("mermaid") {
             PreformattedKind::MermaidSource
         } else {
             PreformattedKind::SourceCode
-        }
+        },
     }
 }
 
@@ -104,14 +127,15 @@ pub fn import(source: &str, options: XhtmlOptions) -> Result<ImportOutcome, Xhtm
     let prepared = prepare(source.as_bytes(), &StrictFlowProfile)?;
     let content_root = prepared.tree.root();
     let author_styles = vec![AuthorStyle::default(); prepared.tree.nodes().len()];
-    lowering::lower_prepared(
+    lowering::lower_tree(
         source,
-        prepared,
+        prepared.tree,
         &author_styles,
         lowering::LoweringOptions {
             resource_base: options.resource_base,
             identity: options.identity,
             retention: options.retention,
+            syntax: SourceSyntax::Xhtml,
         },
         content_root,
         &StrictFlowProfile,

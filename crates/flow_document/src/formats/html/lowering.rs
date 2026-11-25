@@ -1,11 +1,12 @@
-//! Internal semantic lowering shared by XHTML adapters. This module does not
+//! Internal structural HTML lowering shared by source adapters. This module does not
 //! select a document root, parse author styles, or recognize format extensions.
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use super::{PreparedXhtml, SourceNodeId, XhtmlElement, XhtmlSourceNodeKind, XhtmlSourceTree};
+use super::source::SourceSyntax;
+use super::tree::{Element, NodeProvenance, SourceNodeId, SourceNodeKind, SourceTree};
 use crate::model::flow::{
     AnchorId, AuthorStyle, BaseDirection, BidiMode, BidiState, BuildError, Cell, CellKind,
     Destination, Diagnostic, DiagnosticKind, DiagnosticSeverity, Disclosure, DocumentReference,
@@ -15,8 +16,7 @@ use crate::model::flow::{
     MediaKind, NodeId, NodeKind, NonEmptyText, Origin, OriginId, Placement, PositiveCssPixels,
     Preformatted, PreformattedKind, Resource, ResourceId, RetainedSourceBundle,
     RetainedSourceError, RowGroup, SemanticStyleKey, Semantics, SourceArtifactId, SourceDigest,
-    SourceNodeIdentity, SourceRetention, StyleInput, StyleInputId, Table, UnsupportedObject,
-    UnsupportedReason,
+    SourceRetention, StyleInput, StyleInputId, Table, UnsupportedObject, UnsupportedReason,
 };
 use thiserror::Error;
 
@@ -25,12 +25,25 @@ const MAX_TABLE_COLUMNS: u32 = 4_096;
 
 /// Hooks selected explicitly by each format adapter, never public import API.
 pub(in crate::formats) trait LoweringPolicy {
-    fn math_metadata(&self, _element: &XhtmlElement) -> Option<(String, MathDisplay)> {
+    fn math_metadata(&self, _element: &Element) -> Option<(String, MathDisplay)> {
         None
     }
 
-    fn code_kind(&self, _language: Option<&str>) -> PreformattedKind {
-        PreformattedKind::SourceCode
+    /// Only HTML (or unqualified fragment) names have HTML structural meaning.
+    /// Legacy XML adapters explicitly opt into their historical local-name policy.
+    fn element_name<'a>(&self, element: &'a Element) -> Option<&'a str> {
+        matches!(
+            element.name().namespace(),
+            None | Some("http://www.w3.org/1999/xhtml")
+        )
+        .then(|| element.name().local())
+    }
+
+    fn code_metadata(&self, _element: &Element) -> Preformatted {
+        Preformatted {
+            language: None,
+            content_kind: PreformattedKind::SourceCode,
+        }
     }
 }
 
@@ -43,7 +56,7 @@ pub(in crate::formats) enum LoweringError {
 }
 
 struct Lowerer<'a> {
-    tree: &'a XhtmlSourceTree,
+    tree: &'a SourceTree,
     builder: FlowBuilder,
     source_id: SourceArtifactId,
     origins: Vec<Option<OriginId>>,
@@ -53,6 +66,7 @@ struct Lowerer<'a> {
     resources: HashMap<String, ResourceId>,
     diagnostics: Vec<Diagnostic>,
     policy: &'a dyn LoweringPolicy,
+    syntax: SourceSyntax,
 }
 
 #[derive(Default)]
@@ -66,11 +80,12 @@ pub(in crate::formats) struct LoweringOptions {
     pub resource_base: Option<String>,
     pub identity: Option<DocumentReference>,
     pub retention: SourceRetention,
+    pub syntax: SourceSyntax,
 }
 
-pub(in crate::formats) fn lower_prepared(
+pub(in crate::formats) fn lower_tree(
     source: &str,
-    prepared: PreparedXhtml,
+    tree: SourceTree,
     author_styles: &[AuthorStyle],
     options: LoweringOptions,
     content_root: SourceNodeId,
@@ -81,11 +96,11 @@ pub(in crate::formats) fn lower_prepared(
     let source_id = builder.add_source(
         source.to_owned(),
         options.identity,
-        Some("application/xhtml+xml".into()),
+        Some(options.syntax.media_type().into()),
     )?;
-    let node_count = prepared.tree.nodes().len();
+    let node_count = tree.nodes().len();
     let mut lowerer = Lowerer {
-        tree: &prepared.tree,
+        tree: &tree,
         builder,
         source_id,
         origins: vec![None; node_count],
@@ -95,6 +110,7 @@ pub(in crate::formats) fn lower_prepared(
         resources: HashMap::new(),
         diagnostics: Vec::new(),
         policy,
+        syntax: options.syntax,
     };
     let root = lowerer.node(NodeKind::Document, content_root, None)?;
     lowerer.append_flow_children(root, content_root)?;
@@ -337,20 +353,15 @@ impl Lowerer<'_> {
                 .copied()
                 .find(|child| self.element_name(*child) == Some("code"))
         };
-        let class = code
-            .and_then(|code| self.element(code))
-            .and_then(|element| element.attribute(None, "class"));
-        let language = class.and_then(language_from_class);
-        let content_kind = if code.is_some() {
-            self.policy.code_kind(language)
-        } else {
-            PreformattedKind::PlainText
-        };
+        let metadata = code.and_then(|code| self.element(code)).map_or(
+            Preformatted {
+                language: None,
+                content_kind: PreformattedKind::PlainText,
+            },
+            |element| self.policy.code_metadata(element),
+        );
         let node = self.node(
-            NodeKind::Preformatted(Preformatted {
-                language: language.map(str::to_owned),
-                content_kind,
-            }),
+            NodeKind::Preformatted(metadata),
             source,
             Some(SemanticStyleKey::Preformatted),
         )?;
@@ -739,9 +750,7 @@ impl Lowerer<'_> {
 
     fn collect_text(&self, source: SourceNodeId, output: &mut String) {
         match self.tree.get(source).unwrap().kind() {
-            XhtmlSourceNodeKind::Text(value) | XhtmlSourceNodeKind::Cdata(value) => {
-                output.push_str(value)
-            }
+            SourceNodeKind::Text(value) | SourceNodeKind::Cdata(value) => output.push_str(value),
             _ => {
                 for child in self.tree.get(source).unwrap().children() {
                     self.collect_text(*child, output);
@@ -774,7 +783,7 @@ impl Lowerer<'_> {
     ) -> Result<Option<NodeId>, LoweringError> {
         let kind = self.tree.get(source).unwrap().kind().clone();
         match kind {
-            XhtmlSourceNodeKind::Text(value) | XhtmlSourceNodeKind::Cdata(value) => {
+            SourceNodeKind::Text(value) | SourceNodeKind::Cdata(value) => {
                 let normalized = normalize_inline_text(&value, whitespace);
                 if normalized.is_empty() {
                     return Ok(None);
@@ -784,11 +793,15 @@ impl Lowerer<'_> {
                 self.builder.set_origin(node, origin)?;
                 Ok(Some(node))
             }
-            XhtmlSourceNodeKind::Comment(_)
-            | XhtmlSourceNodeKind::ProcessingInstruction { .. }
-            | XhtmlSourceNodeKind::Document => Ok(None),
-            XhtmlSourceNodeKind::Element(element) => {
-                let name = element.name().local().to_owned();
+            SourceNodeKind::Comment(_)
+            | SourceNodeKind::ProcessingInstruction { .. }
+            | SourceNodeKind::Document => Ok(None),
+            SourceNodeKind::Element(element) => {
+                let name = self
+                    .policy
+                    .element_name(&element)
+                    .unwrap_or_default()
+                    .to_owned();
                 if let Some((tex, display)) = self.math_metadata(source) {
                     let math = self.node(
                         NodeKind::Math(Math {
@@ -930,7 +943,7 @@ impl Lowerer<'_> {
         semantic_style: Option<SemanticStyleKey>,
         origin: OriginId,
     ) -> Result<(), LoweringError> {
-        let XhtmlSourceNodeKind::Element(element) = self.tree.get(source).unwrap().kind() else {
+        let SourceNodeKind::Element(element) = self.tree.get(source).unwrap().kind() else {
             if let Some(style) = semantic_style {
                 let style = self.style(Some(style), None, AuthorStyle::default())?;
                 self.builder.set_style_input(node, style)?;
@@ -1025,14 +1038,33 @@ impl Lowerer<'_> {
         if let Some(origin) = self.origins[source.index()] {
             return Ok(origin);
         }
-        let range = self.tree.get(source).unwrap().source_range();
-        let origin = self.builder.add_origin(Origin::Xhtml {
-            source: self.source_id,
-            source_node: SourceNodeIdentity(format!("xhtml:{}", source.index())),
-            serialized_range: Some(range),
-        })?;
-        self.origins[source.index()] = Some(origin);
-        Ok(origin)
+        // Generated provenance only points backwards, so origin chains are
+        // acyclic. Resolve iteratively to avoid recursion on transformed trees.
+        let mut pending = Vec::new();
+        let mut cursor = source;
+        while self.origins[cursor.index()].is_none() {
+            let node = self.tree.get(cursor).unwrap();
+            match &node.provenance {
+                NodeProvenance::Original { identity } => {
+                    let origin =
+                        self.syntax
+                            .origin(self.source_id, cursor, node, identity.as_ref());
+                    self.origins[cursor.index()] = Some(self.builder.add_origin(origin)?);
+                }
+                NodeProvenance::Generated { reason, related } => {
+                    pending.push((cursor, *reason, *related));
+                    cursor = *related;
+                }
+            }
+        }
+        for (id, reason, related) in pending.into_iter().rev() {
+            let origin = self.builder.add_origin(Origin::Generated {
+                reason,
+                related: self.origins[related.index()],
+            })?;
+            self.origins[id.index()] = Some(origin);
+        }
+        Ok(self.origins[source.index()].unwrap())
     }
 
     fn append_unwrapped_table_children(
@@ -1121,15 +1153,16 @@ impl Lowerer<'_> {
         self.policy.math_metadata(self.element(source)?)
     }
 
-    fn element(&self, source: SourceNodeId) -> Option<&super::XhtmlElement> {
+    fn element(&self, source: SourceNodeId) -> Option<&Element> {
         match self.tree.get(source)?.kind() {
-            XhtmlSourceNodeKind::Element(element) => Some(element),
+            SourceNodeKind::Element(element) => Some(element),
             _ => None,
         }
     }
 
     fn element_name(&self, source: SourceNodeId) -> Option<&str> {
-        self.element(source).map(|element| element.name().local())
+        self.element(source)
+            .and_then(|element| self.policy.element_name(element))
     }
 
     fn is_block(&self, source: SourceNodeId) -> bool {
@@ -1179,22 +1212,13 @@ impl Lowerer<'_> {
 
     fn source_is_ignorable_whitespace(&self, source: SourceNodeId) -> bool {
         match self.tree.get(source).unwrap().kind() {
-            XhtmlSourceNodeKind::Text(value) | XhtmlSourceNodeKind::Cdata(value) => {
+            SourceNodeKind::Text(value) | SourceNodeKind::Cdata(value) => {
                 value.chars().all(is_collapsible_whitespace)
             }
-            XhtmlSourceNodeKind::Comment(_) | XhtmlSourceNodeKind::ProcessingInstruction { .. } => {
-                true
-            }
+            SourceNodeKind::Comment(_) | SourceNodeKind::ProcessingInstruction { .. } => true,
             _ => false,
         }
     }
-}
-
-fn language_from_class(class: &str) -> Option<&str> {
-    class
-        .split_ascii_whitespace()
-        .find_map(|token| token.strip_prefix("language-"))
-        .filter(|language| !language.is_empty())
 }
 
 fn parse_positive_dimension(value: Option<&str>) -> Option<PositiveCssPixels> {
@@ -1305,20 +1329,18 @@ mod tests {
         impl LoweringPolicy for NoExtensions {}
 
         let source = "<p>Before <span data-tex='x' class='katex'>visible fallback</span>.</p><pre><code class='language-mermaid'>graph TD\n  One --&gt; Two</code></pre>";
-        let tree = super::super::parse(source.as_bytes()).unwrap();
+        let tree = crate::formats::xhtml::parse(source.as_bytes()).unwrap();
         let root = tree.root();
         let styles = vec![AuthorStyle::default(); tree.nodes().len()];
-        let outcome = lower_prepared(
+        let outcome = lower_tree(
             source,
-            PreparedXhtml {
-                tree,
-                diagnostics: Vec::new(),
-            },
+            tree,
             &styles,
             LoweringOptions {
                 resource_base: None,
                 identity: None,
                 retention: SourceRetention::Discard,
+                syntax: SourceSyntax::Xhtml,
             },
             root,
             &NoExtensions,
@@ -1335,7 +1357,7 @@ mod tests {
                 .iter()
                 .any(|kind| matches!(kind, NodeKind::Preformatted(code)
             if code.content_kind == PreformattedKind::SourceCode
-                && code.language.as_deref() == Some("mermaid")))
+                && code.language.is_none()))
         );
         assert_eq!(
             outcome.document.text().as_str(),

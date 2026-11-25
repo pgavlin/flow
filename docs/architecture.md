@@ -21,14 +21,27 @@ EPUB XHTML into `FlowDocument`, an immutable semantic model with logical text,
 nodes, styles, resources, and provenance. Layout and interaction indexes derive
 from that model.
 
-`formats::xhtml` supplies shared XML syntax, source trees, and
-validation-profile support. `formats::flow_xhtml` owns the flow format's
-versions and conventions; `formats::epub_xhtml` owns complete-document
-validation, author stylesheet cascading, and semantic import. Shared semantic
-lowering and its policy hooks are internal to the format layer, not public
-extension APIs. Each adapter explicitly selects its content root and supported
-source conventions. Publication resource resolution remains in
-`flow_publication`.
+`formats::xhtml` supplies strict XML parsing and validation-profile support.
+Its public source-tree names remain available as compatibility re-exports.
+Internal `formats::html` supplies the shared syntactic tree, bounded DOM
+construction, source provenance, and structural HTML lowering. It does not
+select lexical policy or a source format's semantic conventions.
+`formats::flow_xhtml` owns the flow format's versions and conventions;
+`formats::epub_xhtml` owns complete-document validation, author stylesheet
+cascading, and semantic import. Adapters explicitly select their content root,
+namespace policy, and supported source conventions through narrow internal
+hooks. Shared lowering does not recognize flow-, EPUB-, or MediaWiki-specific
+attributes or classes. HTML adapters can construct trees directly and lower to
+the flow IR without serializing XML or going through the flow XHTML vocabulary.
+There is not yet a generic HTML importer or HTML5 parser integration.
+
+Constructed trees can retain original node identities, omit unknown serialized
+ranges, and associate generated nodes with their original constructs. HTML
+provenance refers to the original `text/html` source, never a normalized
+serialization. Default construction budgets bound nodes, depth, attributes, and
+text/attribute data while adapting a DOM; a future parser integration must also
+bound its own input and allocations. XML retains its existing lexical limits.
+Publication resource resolution remains in `flow_publication`.
 
 With `render`, text shaping and paragraph composition produce continuous
 layouts and page fragments. `DocumentViewer` coordinates presentation,

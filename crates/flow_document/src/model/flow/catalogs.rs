@@ -371,6 +371,12 @@ pub enum Origin {
         reason: GeneratedReason,
         related: Option<OriginId>,
     },
+    /// Provenance in original HTML bytes, not a normalized serialization.
+    Html {
+        source: SourceArtifactId,
+        source_node: SourceNodeIdentity,
+        serialized_range: Option<Range<usize>>,
+    },
 }
 
 /// Importer-assigned identity of a node in a temporary source tree.

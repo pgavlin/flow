@@ -1,6 +1,6 @@
-//! Shared XHTML syntax support: strict XML parsing, names, source trees, and
-//! validation profiles. Semantic import policy belongs to the format adapters;
-//! shared lowering is an internal implementation detail.
+//! Strict XML parsing and validation profiles, with compatibility exports of
+//! the shared HTML source tree. Semantic policy belongs to the format adapters;
+//! shared structural lowering is an internal implementation detail.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -12,187 +12,18 @@ use quick_xml::name::{QName, ResolveResult};
 use quick_xml::reader::NsReader;
 use thiserror::Error;
 
-pub(super) mod lowering;
-
 const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_NODES: usize = 1_000_000;
 const MAX_DEPTH: usize = 4_096;
 const MAX_ATTRIBUTES_PER_ELEMENT: usize = 4_096;
 
-/// Stable identity of a node in one temporary XHTML source tree.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SourceNodeId(u32);
-
-impl SourceNodeId {
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// A qualified XML name with its namespace resolved at the source location.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ExpandedName {
-    qualified: String,
-    prefix: Option<String>,
-    local: String,
-    namespace: Option<String>,
-}
-
-impl ExpandedName {
-    pub fn qualified(&self) -> &str {
-        &self.qualified
-    }
-
-    pub fn prefix(&self) -> Option<&str> {
-        self.prefix.as_deref()
-    }
-
-    pub fn local(&self) -> &str {
-        &self.local
-    }
-
-    pub fn namespace(&self) -> Option<&str> {
-        self.namespace.as_deref()
-    }
-}
-
-/// One decoded attribute in source order.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct XhtmlAttribute {
-    name: ExpandedName,
-    value: String,
-    source_range: Range<usize>,
-}
-
-impl XhtmlAttribute {
-    pub fn name(&self) -> &ExpandedName {
-        &self.name
-    }
-
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    /// Range of the containing start tag. `quick-xml` does not expose a
-    /// narrower attribute range, but retaining this range still gives repairs
-    /// a deterministic source location.
-    pub fn source_range(&self) -> Range<usize> {
-        self.source_range.clone()
-    }
-}
-
-/// Element data retained before validation, repair, and semantic lowering.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct XhtmlElement {
-    name: ExpandedName,
-    attributes: Vec<XhtmlAttribute>,
-}
-
-impl XhtmlElement {
-    pub fn name(&self) -> &ExpandedName {
-        &self.name
-    }
-
-    pub fn attributes(&self) -> &[XhtmlAttribute] {
-        &self.attributes
-    }
-
-    pub fn attribute(&self, namespace: Option<&str>, local: &str) -> Option<&str> {
-        self.attributes
-            .iter()
-            .find(|attribute| {
-                attribute.name.local() == local && attribute.name.namespace() == namespace
-            })
-            .map(XhtmlAttribute::value)
-    }
-}
-
-/// Syntactic node kinds retained by the temporary source tree.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum XhtmlSourceNodeKind {
-    Document,
-    Element(XhtmlElement),
-    Text(String),
-    Cdata(String),
-    Comment(String),
-    ProcessingInstruction { target: String, value: String },
-}
-
-/// One arena node in the temporary source tree.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct XhtmlSourceNode {
-    parent: Option<SourceNodeId>,
-    children: Vec<SourceNodeId>,
-    kind: XhtmlSourceNodeKind,
-    source_range: Range<usize>,
-}
-
-impl XhtmlSourceNode {
-    pub fn parent(&self) -> Option<SourceNodeId> {
-        self.parent
-    }
-
-    pub fn children(&self) -> &[SourceNodeId] {
-        &self.children
-    }
-
-    pub fn kind(&self) -> &XhtmlSourceNodeKind {
-        &self.kind
-    }
-
-    pub fn source_range(&self) -> Range<usize> {
-        self.source_range.clone()
-    }
-}
-
-/// A flow-owned arena representation of an XML fragment.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct XhtmlSourceTree {
-    nodes: Vec<XhtmlSourceNode>,
-    root: SourceNodeId,
-}
-
-impl XhtmlSourceTree {
-    pub fn root(&self) -> SourceNodeId {
-        self.root
-    }
-
-    pub fn get(&self, id: SourceNodeId) -> Option<&XhtmlSourceNode> {
-        self.nodes.get(id.index())
-    }
-
-    pub fn get_mut(&mut self, id: SourceNodeId) -> Option<&mut XhtmlSourceNode> {
-        self.nodes.get_mut(id.index())
-    }
-
-    pub fn nodes(&self) -> impl ExactSizeIterator<Item = (SourceNodeId, &XhtmlSourceNode)> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (SourceNodeId(index as u32), node))
-    }
-
-    fn push(
-        &mut self,
-        parent: SourceNodeId,
-        kind: XhtmlSourceNodeKind,
-        source_range: Range<usize>,
-    ) -> Result<SourceNodeId, XhtmlParseError> {
-        if self.nodes.len() >= MAX_NODES || self.nodes.len() > u32::MAX as usize {
-            return Err(XhtmlParseError::TooComplex);
-        }
-        let id = SourceNodeId(self.nodes.len() as u32);
-        self.nodes.push(XhtmlSourceNode {
-            parent: Some(parent),
-            children: Vec::new(),
-            kind,
-            source_range,
-        });
-        self.nodes[parent.index()].children.push(id);
-        Ok(id)
-    }
-}
+// Keep the public XML syntax API source-compatible while sharing its tree.
+pub use super::html::tree::{
+    Attribute as XhtmlAttribute, Element as XhtmlElement, ExpandedName,
+    SourceNode as XhtmlSourceNode, SourceNodeId, SourceNodeKind as XhtmlSourceNodeKind,
+    SourceTree as XhtmlSourceTree,
+};
+use super::html::tree::{TreeError, TreeLimits};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct XhtmlParseOptions {
@@ -209,6 +40,13 @@ pub enum XhtmlParseError {
     Doctype { offset: usize },
     #[error("XHTML input exceeds the parser complexity limit")]
     TooComplex,
+}
+
+impl From<TreeError> for XhtmlParseError {
+    fn from(_error: TreeError) -> Self {
+        // The lexical parser only appends valid parents and serialized ranges.
+        Self::TooComplex
+    }
 }
 
 /// A diagnostic emitted by a validation/repair profile before lowering.
@@ -291,16 +129,10 @@ pub fn parse_with_options(
     reader.config_mut().check_end_names = true;
     reader.config_mut().trim_text(false);
 
-    let root = SourceNodeId(0);
-    let mut tree = XhtmlSourceTree {
-        nodes: vec![XhtmlSourceNode {
-            parent: None,
-            children: Vec::new(),
-            kind: XhtmlSourceNodeKind::Document,
-            source_range: 0..source.len(),
-        }],
-        root,
-    };
+    // Preserve the XML parser's existing limits exactly; it enforces depth,
+    // attribute count, and input bytes itself. HTML adapters use bounded builders.
+    let mut tree = XhtmlSourceTree::new(Some(0..source.len()), TreeLimits::xml())?;
+    let root = tree.root();
     let mut stack = vec![root];
     let mut buffer = Vec::new();
     let mut event_start = 0usize;
@@ -334,7 +166,7 @@ pub fn parse_with_options(
                 if node == root {
                     return Err(malformed(event_start, "unexpected closing tag"));
                 }
-                tree.nodes[node.index()].source_range.end = event_end;
+                tree.nodes[node.index()].source_range.as_mut().unwrap().end = event_end;
             }
             Event::Text(text) => {
                 let value = text
@@ -482,13 +314,13 @@ fn decode_element(
             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|error| malformed(source_range.start, error))?;
         validate_xml_chars(&value, source_range.start)?;
-        attributes.push(XhtmlAttribute {
+        attributes.push(XhtmlAttribute::new(
             name,
-            value: normalize_xml10(value.as_ref()),
-            source_range: source_range.clone(),
-        });
+            normalize_xml10(value.as_ref()),
+            Some(source_range.clone()),
+        ));
     }
-    Ok(XhtmlElement { name, attributes })
+    Ok(XhtmlElement::new(name, attributes))
 }
 
 fn decode_name(
@@ -572,12 +404,8 @@ fn split_name(qualified: String, namespace: Option<String>) -> ExpandedName {
         .map_or((None, qualified.as_str()), |(prefix, local)| {
             (Some(prefix.to_owned()), local)
         });
-    ExpandedName {
-        local: local.to_owned(),
-        qualified,
-        prefix,
-        namespace,
-    }
+    let local = local.to_owned();
+    ExpandedName::new(qualified, local, prefix, namespace)
 }
 
 fn decode_namespace(
@@ -625,7 +453,7 @@ fn append_text(
         && let XhtmlSourceNodeKind::Text(existing) = &mut tree.nodes[last.index()].kind
     {
         existing.push_str(value);
-        tree.nodes[last.index()].source_range.end = source_range.end;
+        tree.nodes[last.index()].source_range.as_mut().unwrap().end = source_range.end;
         return Ok(());
     }
     tree.push(
