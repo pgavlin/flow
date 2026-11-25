@@ -45,7 +45,13 @@ fn exact_import_outcomes() {
     };
     for path in paths {
         let source = std::fs::read_to_string(&path).unwrap();
-        let name = path.strip_prefix(&fixture_root).unwrap().to_str().unwrap();
+        let name = path
+            .strip_prefix(&fixture_root)
+            .unwrap()
+            .components()
+            .map(|component| component.as_os_str().to_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("/");
         for version in [0, 1] {
             for retain in [false, true] {
                 let result = flow_xhtml::import(
