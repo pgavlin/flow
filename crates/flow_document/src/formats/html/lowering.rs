@@ -26,6 +26,15 @@ const MAX_TABLE_COLUMNS: u32 = 4_096;
 
 /// Hooks selected explicitly by each format adapter, never public import API.
 pub(in crate::formats) trait LoweringPolicy {
+    /// Adapter-owned interpretation of deferred image alternatives.
+    fn responsive_image(
+        &self,
+        _element: &Element,
+        _builder: &mut FlowBuilder,
+    ) -> Result<Option<crate::model::flow::ResponsiveImage>, BuildError> {
+        Ok(None)
+    }
+
     /// Lower the whole preformatted container as literal phrasing, retaining
     /// semantics and targets rather than flattening its first code child.
     fn preformatted_all_children(&self) -> bool {
@@ -900,12 +909,15 @@ impl Lowerer<'_> {
     }
 
     fn lower_image(&mut self, source: SourceNodeId) -> Result<NodeId, LoweringError> {
-        let element = self.element(source).unwrap();
+        let SourceNodeKind::Element(element) = self.tree.get(source).unwrap().kind() else {
+            unreachable!()
+        };
         let identity = element
             .attribute(None, "src")
             .unwrap_or_default()
             .to_owned();
         let title = self.policy.title(element);
+        let responsive = self.policy.responsive_image(element, &mut self.builder)?;
         let alternative = element.attribute(None, "alt").map(str::to_owned);
         let width = element.attribute(None, "width").map(str::to_owned);
         let height = element.attribute(None, "height").map(str::to_owned);
@@ -946,6 +958,7 @@ impl Lowerer<'_> {
                 alternative,
                 title,
                 intrinsic_size,
+                responsive,
             }),
             source,
             None,

@@ -1,6 +1,8 @@
 use super::*;
 use crate::model::flow::{AnchorId, Destination, NodeKind, Origin};
 
+mod responsive;
+
 fn article(extra: &str) -> String {
     format!("<!doctype html><html lang='en'><head><title>A useful article</title><meta name='author' content='A Writer'></head><body><nav>BOILERPLATE navigation</nav><article><h1>A useful article</h1>{}<h2>More details</h2>{extra}</article><footer>FOOTER navigation</footer></body></html>",
         "<p>This is a substantial article paragraph, with sentences, commas, and useful information for the reader. It is not navigation or advertising. We want to preserve the entire story and its ordinary reading structure.</p>".repeat(6))
@@ -119,32 +121,45 @@ fn preserves_inline_roles_titles_and_sections() {
 }
 
 #[test]
-fn retains_explicit_image_source_and_diagnoses_responsive_reduction() {
+fn retains_explicit_image_source_and_responsive_alternatives() {
     let imported = import(
         &article("<p><img src='https://example.test/default.png' srcset='https://example.test/large.png 2x' alt='Photo'></p>"),
         Default::default(),
     ).unwrap();
-    assert_eq!(imported.content.document.resources().len(), 1);
+    let document = &imported.content.document;
+    let image = document
+        .preorder(document.root())
+        .find_map(|id| match &document.get_node(id).unwrap().kind {
+            NodeKind::Image(image) => Some(image),
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(
-        imported
-            .content
-            .document
-            .resources()
-            .next()
-            .unwrap()
-            .1
-            .identity,
+        document.get_resource(image.resource).unwrap().identity,
         "https://example.test/default.png"
     );
+    let candidates = &image
+        .responsive
+        .as_ref()
+        .unwrap()
+        .fallback
+        .as_ref()
+        .unwrap()
+        .candidates;
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(
+        document
+            .get_resource(candidates[0].resource)
+            .unwrap()
+            .identity,
+        "https://example.test/large.png"
+    );
     assert!(
-        imported
+        !imported
             .content
             .diagnostics
             .iter()
-            .any(
-                |diagnostic| diagnostic.kind == DiagnosticKind::DroppedNonTextualMetadata
-                    && diagnostic.message.contains("responsive alternatives")
-            )
+            .any(|diagnostic| diagnostic.kind == DiagnosticKind::DroppedNonTextualMetadata)
     );
 }
 

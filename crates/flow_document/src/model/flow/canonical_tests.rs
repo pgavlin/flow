@@ -2,6 +2,8 @@ use std::num::NonZeroU32;
 
 use super::*;
 
+mod responsive;
+
 fn add(builder: &mut FlowBuilder, kind: NodeKind) -> NodeId {
     builder.add_node(kind).unwrap()
 }
@@ -282,6 +284,7 @@ fn every_logical_text_rule_has_a_table_driven_golden() {
                 resource,
                 alternative: ImageAlternative::Text(NonEmptyText::new("alt").unwrap()),
                 title: None,
+                responsive: None,
                 intrinsic_size: None,
             }),
         );
@@ -421,6 +424,7 @@ fn atomic_alternatives_and_object_replacements_are_canonical() {
             resource,
             alternative: ImageAlternative::Text(NonEmptyText::new("alt").unwrap()),
             title: None,
+            responsive: None,
             intrinsic_size: None,
         }),
     );
@@ -430,6 +434,7 @@ fn atomic_alternatives_and_object_replacements_are_canonical() {
             resource,
             alternative: ImageAlternative::Decorative,
             title: None,
+            responsive: None,
             intrinsic_size: None,
         }),
     );
@@ -439,6 +444,7 @@ fn atomic_alternatives_and_object_replacements_are_canonical() {
             resource,
             alternative: ImageAlternative::Missing,
             title: None,
+            responsive: None,
             intrinsic_size: None,
         }),
     );
@@ -945,6 +951,7 @@ fn flow_semantic_xhtml_contract_example_has_expected_canonical_text() {
             resource,
             alternative: ImageAlternative::Text(NonEmptyText::new("Quarterly revenue").unwrap()),
             title: None,
+            responsive: None,
             intrinsic_size: Some(IntrinsicSize {
                 width: PositiveCssPixels::new(640.0).unwrap(),
                 height: PositiveCssPixels::new(360.0).unwrap(),

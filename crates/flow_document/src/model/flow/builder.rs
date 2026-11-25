@@ -69,6 +69,9 @@ pub enum BuildError {
     #[error("optional metadata field {field} must not contain an empty string")]
     EmptyOptionalMetadata { field: &'static str },
 
+    #[error("invalid responsive image candidates on node {node:?}")]
+    InvalidImageCandidates { node: NodeId },
+
     /// An operation referenced a draft ID outside this builder.
     #[error("node ID {node:?} is outside this builder")]
     InvalidNode { node: NodeId },
@@ -672,13 +675,52 @@ impl FlowBuilder {
             if node.semantics.roles.iter().any(|role| !roles.insert(role)) {
                 return Err(BuildError::DuplicateSemanticRole { node: id });
             }
-            if let NodeKind::Image(image) = &node.kind
-                && self.resources.get(image.resource.index()).is_none()
-            {
-                return Err(BuildError::InvalidResource {
-                    node: id,
-                    resource: image.resource,
-                });
+            if let NodeKind::Image(image) = &node.kind {
+                let mut resources = vec![image.resource];
+                if let Some(responsive) = &image.responsive {
+                    if responsive.sources.is_empty() && responsive.fallback.is_none() {
+                        return Err(BuildError::InvalidImageCandidates { node: id });
+                    }
+                    for source in &responsive.sources {
+                        reject_empty_optional("image.source.media", &source.media)?;
+                        reject_empty_optional("image.source.media_type", &source.media_type)?;
+                    }
+                    for set in responsive
+                        .sources
+                        .iter()
+                        .map(|source| &source.candidates)
+                        .chain(responsive.fallback.iter())
+                    {
+                        reject_empty_optional("image.sizes", &set.sizes)?;
+                        let mut descriptors = Vec::new();
+                        let width_based = set.candidates.first().is_some_and(|candidate| {
+                            matches!(
+                                candidate.descriptor,
+                                super::ImageCandidateDescriptor::Width(_)
+                            )
+                        });
+                        if set.candidates.is_empty() {
+                            return Err(BuildError::InvalidImageCandidates { node: id });
+                        }
+                        for candidate in &set.candidates {
+                            use super::ImageCandidateDescriptor::{Density, Width};
+                            let valid = match candidate.descriptor {
+                                Width(_) => width_based,
+                                Density(value) => !width_based && value.is_finite() && value > 0.0,
+                            };
+                            if !valid || descriptors.contains(&candidate.descriptor) {
+                                return Err(BuildError::InvalidImageCandidates { node: id });
+                            }
+                            descriptors.push(candidate.descriptor);
+                            resources.push(candidate.resource);
+                        }
+                    }
+                }
+                for resource in resources {
+                    if self.resources.get(resource.index()).is_none() {
+                        return Err(BuildError::InvalidResource { node: id, resource });
+                    }
+                }
             }
         }
         Ok(())
@@ -1703,6 +1745,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Missing,
                 title: None,
+                responsive: None,
                 intrinsic_size: None,
             }),
         );
@@ -1722,6 +1765,7 @@ mod tests {
                 resource: invalid,
                 alternative: ImageAlternative::Missing,
                 title: None,
+                responsive: None,
                 intrinsic_size: None,
             }),
         );
@@ -1893,6 +1937,7 @@ mod tests {
                     resource: ResourceId::from_index(0),
                     alternative: ImageAlternative::Decorative,
                     title: Some(String::new()),
+                    responsive: None,
                     intrinsic_size: None,
                 }),
                 "image.title",

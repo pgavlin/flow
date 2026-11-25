@@ -60,9 +60,21 @@ transitively. Explicitly hidden descendants and remote note bodies are not
 resurrected; inline visibility parsing handles CSS comments, escapes, and
 `!important` priority without attempting stylesheet layout. Missing targets are
 diagnosed.
-After lazy-image recovery, `srcset`-only images receive a deterministic
-single-resource fallback, with lost responsive alternatives diagnosed. Rejected
-image resources retain their alternative text. Display math and other flow
+Images retain a deterministic single-resource fallback for existing renderers,
+plus optional responsive choices: ordered conditional sources with media/type
+hints and separate fallback-image candidates, width/density descriptors, and
+unevaluated `sizes` expressions. The web adapter snapshots picture sources before
+extraction rewrites their wrappers, recovers lazy-image candidates afterwards,
+and resolves each resource against the HTML base. An explicit image `src`
+participates as an implicit 1x density candidate when appropriate; synthesized
+fallbacks do not. Invalid candidates are omitted with diagnostics without losing
+valid neighbors. Shared lowering only invokes an adapter-selected hook; legacy
+XML adapters retain single-resource behavior. Builder validation covers all
+candidate resource references and nonempty, consistently described candidate
+sets with positive, unique descriptors. Semantic cache codec version 3 preserves
+these choices. Selection, condition evaluation, and resource fetching remain
+consumer/host policy; existing renderers continue using the fallback.
+Rejected image resources retain their alternative text. Display math and other flow
 content are split out of phrasing wrappers rather than flattened or inserted into
 invalid inline IR. Layout-table conversion requires explicit presentation intent;
 nesting and paragraph-containing cells are not sufficient evidence.
@@ -79,8 +91,8 @@ strict semantic comparisons for a selected subset and a full-corpus difference
 report separating native extraction differences from pipeline differences.
 Submodule initialization is an explicit development/CI setup step, never an
 importer or test-time network operation. Remaining hardening includes
-global allocation accounting and interruptible extraction-work quotas; the
-separate responsive-image IR design does not block single-resource import.
+global allocation accounting and interruptible extraction-work quotas.
+Responsive selection/rendering is separate from preserving alternatives in IR.
 
 Constructed trees can retain original node identities, omit unknown serialized
 ranges, and associate generated nodes with their original constructs. HTML

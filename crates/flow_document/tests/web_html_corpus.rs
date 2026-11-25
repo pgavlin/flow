@@ -227,9 +227,15 @@ fn compare_case(root: &Path, name: &str) -> Vec<String> {
         .iter()
         .filter_map(|node| base.join(&node.attr("src")?).ok().map(String::from))
         .collect();
+    // Compare the deterministic displayed fallback, not responsive candidates
+    // that upstream expected HTML does not project into img src.
     let actual_images: BTreeSet<_> = document
-        .resources()
-        .map(|(_, resource)| resource.identity.clone())
+        .preorder(document.root())
+        .filter_map(|id| match &document.get_node(id).unwrap().kind {
+            NodeKind::Image(image) => document.get_resource(image.resource),
+            _ => None,
+        })
+        .map(|resource| resource.identity.clone())
         .collect();
     if actual_images != expected_images {
         if std::env::var_os("FLOW_READABILITY_CORPUS_VERBOSE").is_some() {

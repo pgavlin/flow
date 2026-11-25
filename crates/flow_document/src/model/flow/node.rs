@@ -413,12 +413,78 @@ pub enum LocationMarkerKind {
 
 /// Semantic image and the resource needed to present it.
 #[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Image {
     pub resource: ResourceId,
     pub alternative: ImageAlternative,
     pub title: Option<String>,
     pub intrinsic_size: Option<IntrinsicSize>,
+    /// Deferred responsive selection. Consumers that do not evaluate it use `resource`.
+    pub responsive: Option<ResponsiveImage>,
+}
+
+// Keep the debug representation of ordinary images stable.
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("Image");
+        debug
+            .field("resource", &self.resource)
+            .field("alternative", &self.alternative)
+            .field("title", &self.title)
+            .field("intrinsic_size", &self.intrinsic_size);
+        if let Some(responsive) = &self.responsive {
+            debug.field("responsive", responsive);
+        }
+        debug.finish()
+    }
+}
+
+/// Ordered conditional alternatives followed by the image's own candidate set.
+/// Conditions and sizes retain source expressions; evaluating them is consumer policy.
+#[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResponsiveImage {
+    /// First matching supported source wins; order is significant.
+    pub sources: Vec<ImageSource>,
+    /// Unconditional candidates belonging to the fallback image, including any
+    /// implicit density-1 candidate supplied by an explicit source resource.
+    /// Consumers must not add `Image.resource` to this set: it can be synthesized.
+    pub fallback: Option<ImageCandidateSet>,
+}
+
+/// A conditional image source, for example an HTML picture source.
+#[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageSource {
+    pub media: Option<String>,
+    pub media_type: Option<String>,
+    pub candidates: ImageCandidateSet,
+}
+
+/// Nonempty, consistently width- or density-described candidates in source order.
+#[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageCandidateSet {
+    pub candidates: Vec<ImageCandidate>,
+    /// Source size expression, not an intrinsic size or an evaluated layout width.
+    pub sizes: Option<String>,
+}
+
+/// An image resource with its selection descriptor.
+#[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageCandidate {
+    pub resource: ResourceId,
+    pub descriptor: ImageCandidateDescriptor,
+}
+
+/// A missing source descriptor is represented as density 1.
+#[cfg_attr(feature = "render", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImageCandidateDescriptor {
+    Width(std::num::NonZeroU32),
+    /// Must be finite and strictly positive; checked by the builder.
+    Density(f32),
 }
 
 /// Alternative-text state imported for an image.

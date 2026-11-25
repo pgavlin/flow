@@ -16,6 +16,7 @@ use url::Url;
 mod normalize;
 mod notes;
 mod parser;
+mod responsive;
 mod visibility;
 #[cfg(test)]
 use normalize::first_srcset_candidate;
@@ -96,8 +97,18 @@ pub enum WebImportError {
     RetainedSource(#[from] RetainedSourceError),
 }
 
-struct WebPolicy;
+struct WebPolicy {
+    responsive: responsive::ResponsiveImages,
+}
 impl LoweringPolicy for WebPolicy {
+    fn responsive_image(
+        &self,
+        element: &Element,
+        builder: &mut crate::model::flow::FlowBuilder,
+    ) -> Result<Option<crate::model::flow::ResponsiveImage>, BuildError> {
+        self.responsive.lower(element, builder)
+    }
+
     fn preformatted_all_children(&self) -> bool {
         true
     }
@@ -356,6 +367,7 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
             node.remove_from_parent();
         }
     }
+    let mut responsive = responsive::ResponsiveImages::capture(&document, base.as_ref());
     repair_before_extraction(&document, base.as_ref(), source_url.as_ref())?;
     let notes = capture_referenced_notes(&document, source_url.as_ref(), base.as_ref())?;
     let declared_modified = meta_content(&document, &["article:modified_time", "dcterms.modified"]);
@@ -422,7 +434,10 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
     normalize_flow_containment(extracted.root(), false)?;
     let mut normalization_diagnostics = normalize_sequences(&extracted);
     normalize_article(&extracted, &metadata.title);
-    let responsive_images = extracted.selection().select("img[srcset]").nodes().len();
+    for image in extracted.selection().select("img").nodes() {
+        responsive.recover(*image, base.as_ref());
+    }
+    normalization_diagnostics.append(&mut responsive.diagnostics);
     check_dom(extracted.root())?;
     let mut tree = SourceTree::new(
         None,
@@ -521,6 +536,7 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
                             | "rel"
                             | "data-import-checkbox"
                             | "data-import-mathml"
+                            | SOURCE_NODE_ATTRIBUTE
                     ) {
                         continue;
                     }
@@ -611,7 +627,7 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
             syntax: SourceSyntax::Html,
         },
         content_root,
-        &WebPolicy,
+        &WebPolicy { responsive },
     )
     .map_err(|error| match error {
         lowering::LoweringError::Build(error) => WebImportError::Build(error),
@@ -635,14 +651,6 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
                 ),
             });
         }
-    }
-    if responsive_images > 0 {
-        content.diagnostics.push(Diagnostic {
-            severity: DiagnosticSeverity::Warning,
-            kind: DiagnosticKind::DroppedNonTextualMetadata,
-            origin: None,
-            message: format!("responsive alternatives for {responsive_images} image(s) were reduced to a single resource"),
-        });
     }
     Ok(WebImportOutcome { content, metadata })
 }

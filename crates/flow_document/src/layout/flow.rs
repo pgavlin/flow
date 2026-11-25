@@ -6023,6 +6023,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Text(NonEmptyText::new("deep image").unwrap()),
                 title: None,
+                responsive: None,
                 intrinsic_size: Some(IntrinsicSize {
                     width: PositiveCssPixels::new(20.0).unwrap(),
                     height: PositiveCssPixels::new(10.0).unwrap(),
@@ -6160,6 +6161,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Text(NonEmptyText::new("linked image").unwrap()),
                 title: None,
+                responsive: None,
                 intrinsic_size: Some(IntrinsicSize {
                     width: PositiveCssPixels::new(30.0).unwrap(),
                     height: PositiveCssPixels::new(20.0).unwrap(),
@@ -6307,6 +6309,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Text(NonEmptyText::new("תמונה").unwrap()),
                 title: None,
+                responsive: None,
                 intrinsic_size: Some(IntrinsicSize {
                     width: PositiveCssPixels::new(40.0).unwrap(),
                     height: PositiveCssPixels::new(20.0).unwrap(),
@@ -6404,6 +6407,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Text(NonEmptyText::new("Missing diagram").unwrap()),
                 title: None,
+                responsive: None,
                 intrinsic_size: None,
             }))
             .unwrap();
@@ -6488,6 +6492,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Text(NonEmptyText::new("chart").unwrap()),
                 title: None,
+                responsive: None,
                 intrinsic_size: Some(IntrinsicSize {
                     width: PositiveCssPixels::new(640.0).unwrap(),
                     height: PositiveCssPixels::new(320.0).unwrap(),
@@ -6809,6 +6814,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Text(NonEmptyText::new("diagram").unwrap()),
                 title: None,
+                responsive: None,
                 intrinsic_size: Some(IntrinsicSize {
                     width: PositiveCssPixels::new(40.0).unwrap(),
                     height: PositiveCssPixels::new(20.0).unwrap(),
@@ -7043,6 +7049,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Text(NonEmptyText::new("tiny").unwrap()),
                 title: None,
+                responsive: None,
                 intrinsic_size: Some(IntrinsicSize {
                     width: PositiveCssPixels::new(300.0).unwrap(),
                     height: PositiveCssPixels::new(200.0).unwrap(),
@@ -7115,6 +7122,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Decorative,
                 title: None,
+                responsive: None,
                 intrinsic_size: Some(IntrinsicSize {
                     width: PositiveCssPixels::new(60.0).unwrap(),
                     height: PositiveCssPixels::new(20.0).unwrap(),
@@ -7282,6 +7290,7 @@ mod tests {
                 resource,
                 alternative: ImageAlternative::Decorative,
                 title: None,
+                responsive: None,
                 intrinsic_size: Some(IntrinsicSize {
                     width: PositiveCssPixels::new(300.0).unwrap(),
                     height: PositiveCssPixels::new(200.0).unwrap(),

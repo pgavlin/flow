@@ -20,8 +20,8 @@ use crate::{
     syntax::SyntaxKind,
 };
 
-// Version 2 adds HTML provenance to the semantic origin vocabulary.
-pub const SEMANTIC_CODEC_VERSION: u32 = 2;
+// Version 2 added HTML provenance; version 3 adds responsive image choices.
+pub const SEMANTIC_CODEC_VERSION: u32 = 3;
 pub const COMPOSITION_CODEC_VERSION: u32 = 2;
 pub const PAGINATION_CODEC_VERSION: u32 = 1;
 

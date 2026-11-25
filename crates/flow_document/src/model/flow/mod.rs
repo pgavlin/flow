@@ -451,6 +451,7 @@ mod tests {
                     resource,
                     alternative: ImageAlternative::Missing,
                     title: None,
+                    responsive: None,
                     intrinsic_size: None,
                 }),
                 NoChildren,

@@ -346,7 +346,8 @@ pub(super) fn repair_before_extraction(
             }
         }
     }
-    // Collapse picture wrappers to their fallback image.
+    // Responsive choices were snapshotted by the adapter. Collapse wrappers
+    // for extraction without losing the alternatives associated with the image.
     for picture in document.select("picture").nodes() {
         if let Some(image) = Selection::from(*picture).select("img").nodes().first() {
             picture.replace_with(image);
@@ -609,40 +610,9 @@ pub(super) fn normalize_article(extracted: &dom_smoothie::Extracted, title: &str
 
 /// Read the first usable candidate, keeping commas inside URLs (notably data
 /// URLs). Descriptor validation avoids turning malformed candidates into fetches.
-pub(super) fn first_srcset_candidate(mut input: &str) -> Option<&str> {
-    while !input.is_empty() {
-        input = input.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == ',');
-        let end = input
-            .find(|c: char| c.is_ascii_whitespace())
-            .unwrap_or(input.len());
-        let url = &input[..end];
-        input = &input[end..];
-        if url.is_empty() {
-            break;
-        }
-        if url.ends_with(',') {
-            return Some(url.trim_end_matches(','));
-        }
-        let end = input.find(',').unwrap_or(input.len());
-        let descriptors: Vec<_> = input[..end].split_ascii_whitespace().collect();
-        let valid = match descriptors.as_slice() {
-            [] => true,
-            [descriptor] => {
-                descriptor.strip_suffix('w').is_some_and(|value| {
-                    value.bytes().all(|c| c.is_ascii_digit())
-                        && value.parse::<u32>().is_ok_and(|value| value > 0)
-                }) || descriptor.strip_suffix('x').is_some_and(|value| {
-                    value
-                        .parse::<f64>()
-                        .is_ok_and(|value| value.is_finite() && value > 0.0)
-                })
-            }
-            _ => false,
-        };
-        if valid {
-            return Some(url);
-        }
-        input = &input[end..];
-    }
-    None
+pub(super) fn first_srcset_candidate(input: &str) -> Option<&str> {
+    super::responsive::parse_srcset(input)
+        .0
+        .first()
+        .map(|(identity, _)| *identity)
 }

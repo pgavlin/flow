@@ -673,6 +673,7 @@ impl Importer<'_> {
                 resource,
                 alternative,
                 title: title.filter(|value| !value.is_empty()),
+                responsive: None,
                 intrinsic_size: None,
             }),
             alt.len(),
