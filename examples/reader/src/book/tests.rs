@@ -354,3 +354,125 @@ fn adjacent_resources_cannot_escape_the_selected_directory() {
     }
     assert!(read_bounded(&document, 1).is_err());
 }
+
+#[test]
+fn response_dispatch_uses_media_type_not_url_extension() {
+    let book = Book::from_response(
+        "https://example.test/misleading.html",
+        "Text/Markdown; charset=utf-8",
+        b"# Markdown\n\nA response.".to_vec(),
+        1,
+    )
+    .unwrap();
+    let session = open(&book);
+    assert_eq!(
+        session.viewer().active_document().unwrap().text().as_str(),
+        "Markdown\n\nA response."
+    );
+    assert!(
+        Book::from_response(
+            "https://example.test/book.epub",
+            "application/pdf",
+            b"%PDF".to_vec(),
+            2
+        )
+        .is_err()
+    );
+    assert!(Book::from_response("https://example.test/book", "", Vec::new(), 2).is_err());
+    let archive = Book::from_response(
+        "https://example.test/no-extension",
+        "application/epub+zip",
+        epub(),
+        3,
+    )
+    .unwrap();
+    assert_eq!(archive.model.reading_order().len(), 2);
+    assert_eq!(
+        ContentFormat::for_content_type("application/xhtml+xml").unwrap(),
+        ContentFormat::WebHtml
+    );
+}
+
+#[test]
+fn response_decoding_honors_charset() {
+    assert_eq!(
+        decode_text(b"caf\xe9", Some("text/html; charset=\"windows-1252\"")).unwrap(),
+        "café"
+    );
+    assert!(decode_text(b"\xff", Some("text/markdown; charset=utf-8")).is_err());
+    assert!(decode_text(b"text", Some("text/plain; charset=unknown")).is_err());
+}
+
+fn web_article() -> String {
+    format!("<!doctype html><html><head><title>Web article</title></head><body><nav>Discarded chrome</nav><article><h1>Web article</h1>{}<h2 id='detail'>Details</h2><p><a href='#detail'>Read details</a></p></article></body></html>",
+        "<p>A long article paragraph with enough text, punctuation, and actual sentences to identify it as the content rather than navigation. This is the text that should be rendered in the example reader.</p>".repeat(6))
+}
+
+#[test]
+fn html_files_and_responses_render_as_extracted_articles() {
+    for book in [
+        Book::from_bytes("article.html", web_article().into_bytes(), 1).unwrap(),
+        Book::from_response(
+            "https://example.test/no-extension",
+            "text/html; charset=utf-8",
+            web_article().into_bytes(),
+            2,
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(book.title, "Web article");
+        let mut session = open(&book);
+        let document = session.viewer().active_document().unwrap();
+        assert!(
+            document
+                .text()
+                .as_str()
+                .contains("A long article paragraph")
+        );
+        assert!(!document.text().as_str().contains("Discarded chrome"));
+        let mut pixels = PixelBuffer::new(400, 240, [255; 3]).unwrap();
+        session
+            .render_into(&mut pixels.surface_mut(), 400, 240, 1.0)
+            .unwrap();
+        assert!(
+            pixels
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] != [255; 3])
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn url_fetch_follows_redirects_and_dispatches_final_content_type() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = std::thread::spawn(move || {
+        for (path, response) in [
+            ("/start.html", "HTTP/1.1 302 Found\r\nLocation: /final.md\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()),
+            ("/final.md", {
+                let body = "# Fetched markdown\n\nA real HTTP response.";
+                format!("HTTP/1.1 200 OK\r\nContent-Type: text/markdown; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+            }),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = [0; 4096];
+            let count = stream.read(&mut request).unwrap();
+            assert!(std::str::from_utf8(&request[..count]).unwrap().starts_with(&format!("GET {path} ")));
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    let book = Book::from_url(&format!("http://{address}/start.html"), 4).unwrap();
+    let session = open(&book);
+    let document = session.viewer().active_document().unwrap();
+    assert_eq!(
+        document.resource_base(),
+        Some(format!("http://{address}/final.md").as_str())
+    );
+    assert!(document.text().as_str().contains("Fetched markdown"));
+    thread.join().unwrap();
+}

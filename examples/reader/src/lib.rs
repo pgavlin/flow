@@ -51,6 +51,12 @@ enum Event {
     #[cfg(target_arch = "wasm32")]
     OpenBytes { name: String, bytes: Vec<u8> },
     #[cfg(target_arch = "wasm32")]
+    OpenResponse {
+        url: String,
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+    #[cfg(target_arch = "wasm32")]
     Run(Job),
 }
 
@@ -599,13 +605,23 @@ impl ApplicationHandler<Event> for App {
         if self.requested_generation == 0
             && let Some(path) = std::env::args_os().nth(1)
             && let Some(generation) = self.begin_open()
-            && let Err(error) = self.submit_open(Job::OpenPath {
-                generation,
-                path: Some(path.into()),
-            })
         {
-            self.opening = false;
-            self.error(error);
+            let location = path.to_string_lossy();
+            let job = if book::external_url(&location).is_ok() {
+                Job::OpenUrl {
+                    generation,
+                    url: location.into_owned(),
+                }
+            } else {
+                Job::OpenPath {
+                    generation,
+                    path: Some(path.into()),
+                }
+            };
+            if let Err(error) = self.submit_open(job) {
+                self.opening = false;
+                self.error(error);
+            }
         }
     }
     fn suspended(&mut self, _: &ActiveEventLoop) {
@@ -630,6 +646,23 @@ impl ApplicationHandler<Event> for App {
             }
             #[cfg(target_arch = "wasm32")]
             Event::Command(command) => self.command(command),
+            #[cfg(target_arch = "wasm32")]
+            Event::OpenResponse {
+                url,
+                content_type,
+                bytes,
+            } => {
+                if let Some(generation) = self.begin_open() {
+                    self.submit_open(Job::OpenResponse {
+                        generation,
+                        url,
+                        content_type,
+                        bytes,
+                    })
+                } else {
+                    Ok(())
+                }
+            }
             #[cfg(target_arch = "wasm32")]
             Event::OpenBytes { name, bytes } => {
                 if let Some(generation) = self.begin_open() {
@@ -878,7 +911,8 @@ fn pack_pixels(source: &PixelBuffer, destination: &mut [u32], width: usize) {
 fn demo_fonts() -> Vec<FontResource> {
     // Reuse licensed repository fixtures rather than discovering system fonts.
     [
-        include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/literata.ttf").as_slice(),
+        include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/literata.ttf")
+            .as_slice(),
         include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/literata-bold.ttf")
             .as_slice(),
         include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/literata-italic.ttf")

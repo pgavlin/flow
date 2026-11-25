@@ -24,6 +24,8 @@ Default features are empty.
 - `render`: text shaping, rasterization, settings, `DocumentViewer`, and
   document/layout cache codecs.
 - `serde`: serialization of core text-position evidence and fingerprints.
+- `web-html`: experimental host-fed web article extraction into the flow IR;
+  no networking. Available without rendering; see `formats::web_html` for limits.
 - `telemetry`: tracing spans and events using the host's subscriber.
 - `test-fonts`: bundled fixture fonts for testing hosts.
 

@@ -21,6 +21,8 @@ required-features = ["render"]
 
 [features]
 default = []
+# Experimental host-fed web article extraction (no networking).
+web-html = ["dep:dom_smoothie", "dep:url"]
 render = [
     "dep:flow_cache",
     "serde",
@@ -48,6 +50,8 @@ workspace = true
 [dependencies]
 flow_cache = { workspace = true, optional = true }
 blake3 = "1"
+dom_smoothie = { version = "0.20", optional = true }
+url = { version = "2.5", optional = true }
 cssparser = "0.38"
 hyphenation = { version = "0.8.4", features = ["embed_en-us"] }
 language-tags = "0.3.2"

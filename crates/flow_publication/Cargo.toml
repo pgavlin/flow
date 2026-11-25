@@ -17,6 +17,7 @@ features = ["render", "epub", "serde"]
 
 [features]
 default = []
+web-html = ["flow_document/web-html"]
 epub = ["dep:quick-xml", "dep:zip"]
 render = ["flow_document/render", "dep:anyhow"]
 serde = ["flow_document/serde"]

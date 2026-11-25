@@ -12,6 +12,8 @@ pub mod flow_xhtml;
 mod html;
 #[path = "markdown_flow.rs"]
 pub mod markdown;
+#[cfg(feature = "web-html")]
+pub mod web_html;
 pub mod xhtml;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

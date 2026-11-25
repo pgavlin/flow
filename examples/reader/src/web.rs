@@ -1,4 +1,4 @@
-//! Browser-only shell. Uploaded bytes are the only acquisition capability.
+//! Browser-only shell. JavaScript supplies bounded uploads or fetched responses.
 use crate::{Command, Event};
 use anyhow::{Result, anyhow, ensure};
 use std::cell::RefCell;
@@ -49,6 +49,17 @@ pub fn open_file(name: String, bytes: Vec<u8>) -> Result<(), JsValue> {
     send(Event::OpenBytes { name, bytes });
     Ok(())
 }
+#[wasm_bindgen]
+pub fn open_response(url: String, content_type: String, bytes: Vec<u8>) -> Result<(), JsValue> {
+    ensure_size(bytes.len()).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    send(Event::OpenResponse {
+        url,
+        content_type,
+        bytes,
+    });
+    Ok(())
+}
+
 fn ensure_size(size: usize) -> Result<()> {
     ensure!(
         size <= crate::book::MAX_INPUT,

@@ -1,15 +1,15 @@
 # Tiny flow reader host
 
 One window (or browser canvas), one open publication, continuous or paginated reading.
-Opens UTF-8 Markdown, **flow semantic XHTML** (not arbitrary web pages), and EPUB.
-No library, persistence, TOC/search/settings panels, remote fetching,
-or application framework.
+Opens Markdown, **flow semantic XHTML**, EPUB, and experimental web articles.
+No library, persistence, TOC/search/settings panels, or application framework.
 
 ## Desktop
 
 ```sh
 cargo run --locked --manifest-path examples/reader/Cargo.toml
 cargo run --locked --manifest-path examples/reader/Cargo.toml -- /path/to/book.epub
+cargo run --locked --manifest-path examples/reader/Cargo.toml -- https://example.org/article
 ```
 
 Targets macOS, Windows and Linux (X11/Wayland). Native rendering-host tests run
@@ -28,7 +28,7 @@ Linux's picker needs an XDG desktop portal backend or Zenity at runtime.
 - Alt+Left or Backspace: back after following a link.
 - Ctrl/Cmd +/−: font size.
 
-Opening another file replaces the current publication and its history. Document
+Opening another file or URL replaces the current publication and its history. Document
 navigation within an open EPUB is transactional through `ReadingSession`.
 Page turns cross EPUB document boundaries: forward to the next document's first
 page, backward to the previous document's last page. The title/status shows the
@@ -55,13 +55,16 @@ the focused canvas also accepts the desktop keys. Touch drag scrolls in continuo
 mode; a horizontal or vertical swipe turns one page in paginated mode. Horizontal
 swipes starting in a wide table/code block scroll that content instead, even at
 its limits. Split fragments share their horizontal offset across pages. Tap follows
-links. Only selected file bytes enter WASM—documents are never uploaded to a
-server. Serve over HTTP(S), not `file:`. No cross-origin-isolation headers needed.
+links. Use the URL field to fetch a web location; cross-origin servers must allow
+CORS. JavaScript streams a bounded response into WASM with its final URL and
+Content-Type. Selected local files are never uploaded to a server. Serve over
+HTTP(S), not `file:`. No cross-origin-isolation headers needed.
 
 An uploaded EPUB can supply its own images/fonts. Standalone browser files have
 no access to neighboring files; embedded base64 data images work. Directory
-picking, remote resources and cross-file standalone links are deliberately out
-of scope. Browser code blocks are plain text unless a host registers WASM grammar
+picking and cross-file standalone links are deliberately out of scope. Remote
+image loading is currently desktop-only; browser URL imports show article text
+and embedded data images. Browser code blocks are plain text unless a host registers WASM grammar
 modules; this demo does not load them. The canvas is not a screen-reader text view.
 
 ## Host boundary and limits
@@ -70,7 +73,8 @@ modules; this demo does not load them. The canvas is not a screen-reader text vi
 adapter selection, acquisition, reference policy and image decoding. The desktop
 uses one bounded input worker; browser jobs run on the event loop (large imports
 can briefly block it). Generations and engine request IDs reject stale results.
-There is no background prefetch or whole-book pagination, and no async runtime.
+There is no background prefetch or whole-book pagination. Desktop HTTP uses a
+blocking client on the input worker; browser fetching uses the platform Fetch API.
 
 Fonts are explicitly supplied from the repository's licensed Literata/Fira Code
 fixtures, not discovered from the system. See
@@ -81,7 +85,29 @@ Demo limits: 64 MiB input, 16 MiB standalone source/resource, 4096×4096 source
 images with a 64 MiB decoder budget, 4 megapixel decoded variants, 16 megapixel
 window. Desktop standalone assets must remain inside the selected document's
 canonical directory; assume those files remain unchanged while open. External
-activation allows HTTP(S) only.
+activation allows HTTP(S) only. Desktop documents opened from web URLs may fetch
+HTTP(S) images; local files do not gain that capability. Fetches omit credentials,
+limit redirects to five on desktop, time out after 30 seconds, and enforce byte
+limits. This demo is not an SSRF isolation boundary: explicitly opening web content
+allows requests from the host's network.
+
+## Web import spike
+
+Responses dispatch by Content-Type, not URL suffix: `text/html` and
+`application/xhtml+xml` use article extraction, `text/markdown`, `text/x-markdown`,
+and `text/plain` use Markdown import, and `application/epub+zip` uses EPUB import.
+Unsupported or missing response media types are errors. Declared HTTP charsets
+are decoded by the host (default UTF-8). Local files still dispatch by extension:
+`.html`/`.htm` are web articles; `.xhtml` is flow semantic XHTML.
+
+The optional engine `web-html` feature uses a native Readability implementation,
+content-preservation repairs, and shared HTML lowering directly into flow IR.
+No XHTML intermediate or engine networking is involved. Input HTML is limited to
+2 MiB, with node/depth checks before extraction; the third-party HTML parser does
+allocate before those checks. This is a spike, not yet a hardened general web
+importer. Math preservation is limited to existing TeX annotations; full math
+recovery, complete note semantics, responsive images, and original byte-offset
+tracking remain future work.
 
 ## Checks
 

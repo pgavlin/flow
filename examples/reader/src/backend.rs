@@ -11,6 +11,15 @@ use flow_publication::{
 use winit::event_loop::EventLoopProxy;
 
 pub enum Job {
+    #[cfg(not(target_arch = "wasm32"))]
+    OpenUrl { generation: u64, url: String },
+    #[cfg(target_arch = "wasm32")]
+    OpenResponse {
+        generation: u64,
+        url: String,
+        content_type: String,
+        bytes: Vec<u8>,
+    },
     OpenBytes {
         generation: u64,
         name: String,
@@ -113,6 +122,21 @@ impl Backend {
 
 fn process(book: &mut Option<(u64, Book)>, job: Job) -> Response {
     match job {
+        #[cfg(not(target_arch = "wasm32"))]
+        Job::OpenUrl { generation, url } => {
+            opened(book, generation, Book::from_url(&url, generation).map(Some))
+        }
+        #[cfg(target_arch = "wasm32")]
+        Job::OpenResponse {
+            generation,
+            url,
+            content_type,
+            bytes,
+        } => opened(
+            book,
+            generation,
+            Book::from_response(&url, &content_type, bytes, generation).map(Some),
+        ),
         Job::OpenBytes {
             generation,
             name,
@@ -126,7 +150,10 @@ fn process(book: &mut Option<(u64, Book)>, job: Job) -> Response {
         Job::OpenPath { generation, path } => {
             let path = path.or_else(|| {
                 rfd::FileDialog::new()
-                    .add_filter("Documents", &["md", "markdown", "xhtml", "html", "epub"])
+                    .add_filter(
+                        "Documents",
+                        &["md", "markdown", "xhtml", "html", "htm", "epub"],
+                    )
                     .pick_file()
             });
             let result = path

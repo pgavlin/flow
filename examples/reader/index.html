@@ -10,12 +10,15 @@
   nav { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px; background: #eee; }
   button { font: inherit; padding: 4px 10px; }
   button[aria-pressed="true"] { background: #ccdcec; }
+  #location { display: flex; gap: 4px; }
+  #url { width: 28ch; font: inherit; }
   #status { flex: 1; min-width: 120px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   main { flex: 1; min-height: 0; overflow: hidden; }
   canvas { width: 100%; height: 100%; display: block; touch-action: none; }
 </style>
 <nav aria-label="Reader controls">
   <button id="open" disabled>Open…</button>
+  <form id="location"><input id="url" type="url" placeholder="https://… (requires CORS)" aria-label="Web location" required><button disabled>Go</button></form>
   <button data-command="back" disabled>Back</button>
   <button data-command="previous" disabled aria-label="Previous document">←</button>
   <button data-command="next" disabled aria-label="Next document">→</button>
@@ -23,13 +26,37 @@
   <button data-command="smaller" disabled aria-label="Smaller text">−</button>
   <button data-command="larger" disabled aria-label="Larger text">+</button>
   <span id="status" role="status" aria-live="polite">Loading reader…</span>
-  <input id="file" type="file" accept=".md,.markdown,.xhtml,.html,.epub" hidden>
+  <input id="file" type="file" accept=".md,.markdown,.xhtml,.html,.htm,.epub" hidden>
 </nav>
 <main><canvas id="reader" tabindex="0" aria-label="Rendered document; P toggles pagination, arrow keys change pages or documents, Page Up and Page Down scroll or turn pages"></canvas></main>
 <script type="module">
-  import init, { command, open_file } from './pkg/flow_demo_reader.js';
+  import init, { command, open_file, open_response } from './pkg/flow_demo_reader.js';
   const status = document.querySelector('#status');
   const file = document.querySelector('#file');
+  let request = 0;
+  let fetching;
+  function nextRequest() { fetching?.abort(); return ++request; }
+  async function boundedBody(response) {
+    const limit = 64 * 1024 * 1024;
+    if (Number(response.headers.get('content-length')) > limit) throw new Error('Response exceeds 64 MiB');
+    if (!response.body) throw new Error('Response has no body');
+    const reader = response.body.getReader();
+    const chunks = [];
+    let length = 0;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        length += value.length;
+        if (length > limit) throw new Error('Response exceeds 64 MiB');
+        chunks.push(value);
+      }
+    } catch (error) { await reader.cancel(); throw error; }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    return bytes;
+  }
   try {
     await init();
     for (const button of document.querySelectorAll('button')) button.disabled = false;
@@ -38,13 +65,37 @@
       command(button.dataset.command);
       document.querySelector('#reader').focus();
     };
+    document.querySelector('#location').onsubmit = async (event) => {
+      event.preventDefault();
+      const token = nextRequest();
+      fetching = new AbortController();
+      const controller = fetching;
+      const timeout = setTimeout(() => controller.abort(), 30000);
+      try {
+        const url = new URL(document.querySelector('#url').value);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Use an HTTP(S) URL without credentials');
+        status.textContent = 'Fetching…';
+        const response = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const bytes = await boundedBody(response);
+        if (token === request) {
+          open_response(response.url, response.headers.get('content-type') || '', bytes);
+          document.querySelector('#reader').focus();
+        }
+      } catch (error) {
+        if (token === request) status.textContent = `Cannot open URL (cross-origin sites must allow CORS): ${error.message}`;
+      } finally { clearTimeout(timeout); }
+    };
     file.onchange = async () => {
       const selected = file.files[0];
       file.value = ''; // Reopening the same file should still generate change.
       if (!selected) return;
+      const token = nextRequest();
       try {
         if (selected.size > 64 * 1024 * 1024) throw new Error('File exceeds the 64 MiB demo limit');
-        open_file(selected.name, new Uint8Array(await selected.arrayBuffer()));
+        const bytes = new Uint8Array(await selected.arrayBuffer());
+        if (token !== request) return;
+        open_file(selected.name, bytes);
         document.querySelector('#reader').focus();
       } catch (error) { status.textContent = `Error: ${error.message}`; }
     };

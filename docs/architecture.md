@@ -33,7 +33,11 @@ namespace policy, and supported source conventions through narrow internal
 hooks. Shared lowering does not recognize flow-, EPUB-, or MediaWiki-specific
 attributes or classes. HTML adapters can construct trees directly and lower to
 the flow IR without serializing XML or going through the flow XHTML vocabulary.
-There is not yet a generic HTML importer or HTML5 parser integration.
+The optional `web-html` adapter parses host-supplied HTML5 with a native
+Readability implementation, performs article extraction and normalization, and
+lowers its DOM directly through this boundary. It returns article metadata
+separately and performs no networking. This importer is experimental: its input
+bytes are bounded, but third-party DOM allocation precedes node/depth checks.
 
 Constructed trees can retain original node identities, omit unknown serialized
 ranges, and associate generated nodes with their original constructs. HTML

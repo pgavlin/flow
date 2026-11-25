@@ -13,7 +13,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-flow_publication = { path = "../../crates/flow_publication", features = ["render", "epub"] }
+encoding_rs = "0.8"
+flow_publication = { path = "../../crates/flow_publication", features = ["render", "epub", "web-html"] }
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 url = "2.5"
@@ -22,6 +23,7 @@ winit = "0.30.13"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.17.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip"] }
 webbrowser = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

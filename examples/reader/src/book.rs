@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
 use flow_publication::{
     document::{
-        formats::{flow_xhtml, markdown},
+        formats::{flow_xhtml, markdown, web_html},
         model::flow::{Destination, DocumentReference, SourceRetention},
         viewer::{FontResource, ImagePixels},
     },
@@ -26,7 +26,7 @@ const MAX_DOCUMENT: usize = 16 * 1024 * 1024;
 const MAX_RESOURCE: usize = 16 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
 
-pub const WELCOME: &str = "# flow demo\n\nOpen a Markdown document, flow semantic XHTML, or EPUB.\n\n- **Ctrl/Cmd+O**: open (or drop a file on the desktop window)\n- **P**: toggle continuous / paginated reading\n- **Wheel, Space, Page Up/Down**: scroll or turn pages\n- **Left/Right**: previous/next page (or EPUB document in continuous mode)\n- **Alt+Left** or **Backspace**: back\n- **Ctrl/Cmd + / −**: font size\n\nClick document links to follow them. This demo has no library, persistence, remote resource fetching, or settings screen.\n\nIn a browser, use the Open button. EPUB images and fonts are self-contained; an uploaded standalone file cannot read neighboring files on your disk.";
+pub const WELCOME: &str = "# flow demo\n\nOpen a Markdown document, web HTML, flow semantic XHTML, or EPUB. Pass an HTTP(S) URL on the desktop command line, or use the browser URL field (requires CORS).\n\n- **Ctrl/Cmd+O**: open (or drop a file on the desktop window)\n- **P**: toggle continuous / paginated reading\n- **Wheel, Space, Page Up/Down**: scroll or turn pages\n- **Left/Right**: previous/next page (or EPUB document in continuous mode)\n- **Alt+Left** or **Backspace**: back\n- **Ctrl/Cmd + / −**: font size\n\nClick document links to follow them. This demo has no library, persistence, or settings screen. Desktop web documents can fetch HTTP(S) images; browser URL import currently loads article text but not remote images.\n\nIn a browser, use the Open button. EPUB images and fonts are self-contained; an uploaded standalone file cannot read neighboring files on your disk.";
 
 pub struct Book {
     pub title: String,
@@ -37,22 +37,86 @@ enum Input {
     Epub(EpubPublication),
     Single {
         document: ImportedDocument,
+        web_url: Option<Url>,
         #[cfg(not(target_arch = "wasm32"))]
         path: Option<std::path::PathBuf>,
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ContentFormat {
+    Epub,
+    Markdown,
+    FlowXhtml,
+    WebHtml,
+}
+
+impl ContentFormat {
+    fn for_content_type(value: &str) -> Result<Self> {
+        match value
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "application/epub+zip" => Ok(Self::Epub),
+            "text/markdown" | "text/x-markdown" | "text/plain" => Ok(Self::Markdown),
+            "text/html" | "application/xhtml+xml" => Ok(Self::WebHtml),
+            _ => bail!("Unsupported response Content-Type: {value}"),
+        }
+    }
+}
+
 impl Book {
     pub fn from_bytes(name: &str, bytes: Vec<u8>, generation: u64) -> Result<Self> {
-        ensure!(
-            bytes.len() <= MAX_INPUT,
-            "File exceeds the 64 MiB demo limit"
-        );
-        let key = PublicationKey::new(format!("demo-open-{generation}"))?;
         let extension = name
             .rsplit_once('.')
             .map(|(_, extension)| extension.to_ascii_lowercase());
-        if extension.as_deref() == Some("epub") {
+        let format = match extension.as_deref() {
+            Some("epub") => ContentFormat::Epub,
+            Some("md" | "markdown") => ContentFormat::Markdown,
+            Some("xhtml") => ContentFormat::FlowXhtml,
+            Some("html" | "htm") => ContentFormat::WebHtml,
+            _ => bail!("Choose .md, .markdown, .xhtml (flow XHTML), .html, or .epub"),
+        };
+        Self::from_content(name, bytes, generation, format, None, None)
+    }
+
+    /// HTTP response media type takes precedence over a misleading URL suffix.
+    pub fn from_response(
+        url: &str,
+        content_type: &str,
+        bytes: Vec<u8>,
+        generation: u64,
+    ) -> Result<Self> {
+        let url = external_url(url)?;
+        let format = ContentFormat::for_content_type(content_type)?;
+        Self::from_content(
+            url.as_str(),
+            bytes,
+            generation,
+            format,
+            Some(url.clone()),
+            Some(content_type),
+        )
+    }
+
+    fn from_content(
+        name: &str,
+        bytes: Vec<u8>,
+        generation: u64,
+        format: ContentFormat,
+        source_url: Option<Url>,
+        content_type: Option<&str>,
+    ) -> Result<Self> {
+        ensure!(
+            bytes.len() <= MAX_INPUT,
+            "Input exceeds the 64 MiB demo limit"
+        );
+        let key = PublicationKey::new(format!("demo-open-{generation}"))?;
+        if format == ContentFormat::Epub {
             let input = EpubPublication::from_bytes(bytes)?;
             let model = input.publication(key)?;
             ensure!(
@@ -69,32 +133,61 @@ impl Book {
             bytes.len() <= MAX_DOCUMENT,
             "Standalone document exceeds the 16 MiB demo limit"
         );
-        let text = std::str::from_utf8(&bytes).context("Standalone documents must be UTF-8")?;
-        let document = match extension.as_deref() {
-            Some("md" | "markdown") => markdown::parse(text, Default::default())?.document,
-            Some("xhtml" | "html") => {
-                flow_xhtml::import(
-                    text,
-                    flow_xhtml::XhtmlOptions {
-                        canonical_version: flow_xhtml::CURRENT_FLOW_SEMANTIC_XHTML_VERSION,
+        let text = decode_text(&bytes, content_type)?;
+        let resource_base = source_url.as_ref().map(ToString::to_string);
+        let identity = resource_base.clone().map(DocumentReference::Host);
+        let mut title = name.to_owned();
+        let document = match format {
+            ContentFormat::Markdown => {
+                markdown::parse(
+                    &text,
+                    markdown::MarkdownOptions {
+                        resource_base,
+                        identity,
                         ..Default::default()
                     },
                 )?
                 .document
             }
-            _ => bail!("Choose .md, .markdown, .xhtml, .html (flow XHTML), or .epub"),
+            ContentFormat::FlowXhtml => {
+                flow_xhtml::import(
+                    &text,
+                    flow_xhtml::XhtmlOptions {
+                        canonical_version: flow_xhtml::CURRENT_FLOW_SEMANTIC_XHTML_VERSION,
+                        resource_base,
+                        identity,
+                        ..Default::default()
+                    },
+                )?
+                .document
+            }
+            ContentFormat::WebHtml => {
+                let imported = web_html::import(
+                    &text,
+                    web_html::WebOptions {
+                        source_url: resource_base,
+                        identity,
+                        ..Default::default()
+                    },
+                )?;
+                if !imported.metadata.title.is_empty() {
+                    title = imported.metadata.title;
+                }
+                imported.content.document
+            }
+            ContentFormat::Epub => unreachable!(),
         };
         let document_key = DocumentKey::new("document")?;
         let model = Publication::new(PublicationDescription {
             key,
             revision: PublicationRevision::new(format!("resident-{generation}"))?,
             metadata: PublicationMetadata {
-                titles: vec![name.into()],
+                titles: vec![title.clone()],
                 ..Default::default()
             },
             documents: vec![DocumentDescriptor {
                 key: document_key.clone(),
-                title: name.into(),
+                title: title.clone(),
                 fonts: Vec::new(),
             }],
             reading_order: vec![document_key],
@@ -103,14 +196,26 @@ impl Book {
             start: None,
         })?;
         Ok(Self {
-            title: name.into(),
+            title,
             model,
             input: Input::Single {
                 document: ImportedDocument::new(document),
+                web_url: source_url,
                 #[cfg(not(target_arch = "wasm32"))]
                 path: None,
             },
         })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_url(url: &str, generation: u64) -> Result<Self> {
+        let response = fetch_http(url, MAX_INPUT)?;
+        Self::from_response(
+            &response.url,
+            &response.content_type,
+            response.bytes,
+            generation,
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -163,12 +268,23 @@ impl Book {
             #[cfg(not(target_arch = "wasm32"))]
             (
                 Input::Single {
+                    web_url: Some(base),
+                    ..
+                },
+                ResourceReference::Host(reference),
+            ) => {
+                let url = base.join(reference)?;
+                fetch_http(url.as_str(), MAX_RESOURCE)?.bytes
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            (
+                Input::Single {
                     path: Some(path), ..
                 },
                 ResourceReference::Host(reference),
             ) => read_bounded(&adjacent_path(path, reference)?, MAX_RESOURCE)?,
             _ => bail!(
-                "Resource unavailable: no remote fetching or browser access to neighboring files"
+                "Resource unavailable: remote images require the desktop host; browser uploads cannot read neighboring files"
             ),
         };
         ensure!(
@@ -235,6 +351,16 @@ impl Book {
                 {
                     let mut url = url;
                     url.set_fragment(anchor.as_ref().map(|anchor| anchor.as_str()));
+                    return Ok(ResolvedLink::External(url.into()));
+                }
+                if let Input::Single {
+                    web_url: Some(base),
+                    ..
+                } = &self.input
+                {
+                    let mut url = base.join(&reference)?;
+                    url.set_fragment(anchor.as_ref().map(|anchor| anchor.as_str()));
+                    external_url(url.as_str())?;
                     return Ok(ResolvedLink::External(url.into()));
                 }
                 #[cfg(not(target_arch = "wasm32"))]
@@ -349,6 +475,74 @@ fn adjacent_path(document: &std::path::Path, reference: &str) -> Result<std::pat
         "Resource escapes the selected document's directory"
     );
     Ok(path)
+}
+
+fn decode_text(bytes: &[u8], content_type: Option<&str>) -> Result<String> {
+    let charset = content_type.and_then(|value| {
+        value.split(';').skip(1).find_map(|part| {
+            let (key, value) = part.trim().split_once('=')?;
+            key.trim()
+                .eq_ignore_ascii_case("charset")
+                .then(|| value.trim().trim_matches(['\"', '\'']))
+        })
+    });
+    let encoding = if let Some(label) = charset {
+        encoding_rs::Encoding::for_label(label.as_bytes())
+            .context("Unsupported response charset")?
+    } else {
+        encoding_rs::UTF_8
+    };
+    let (text, _, errors) = encoding.decode(bytes);
+    ensure!(
+        !errors,
+        "Document is not valid in its declared encoding (default UTF-8)"
+    );
+    Ok(text.into_owned())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct HttpInput {
+    url: String,
+    content_type: String,
+    bytes: Vec<u8>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fetch_http(reference: &str, limit: usize) -> Result<HttpInput> {
+    use std::io::Read;
+    let url = external_url(reference)?;
+    ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "Credentials in URLs are not supported"
+    );
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("flow-demo-reader/0.0 (web import spike)")
+        .build()?;
+    let response = client.get(url).send()?.error_for_status()?;
+    let url = response.url().to_string();
+    external_url(&url)?;
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .context("Response has no valid Content-Type")?
+        .to_owned();
+    ensure!(
+        response
+            .content_length()
+            .is_none_or(|length| length <= limit as u64),
+        "Response exceeds the demo byte limit"
+    );
+    let mut bytes = Vec::new();
+    response.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= limit, "Response exceeds the demo byte limit");
+    Ok(HttpInput {
+        url,
+        content_type,
+        bytes,
+    })
 }
 
 #[cfg(test)]
