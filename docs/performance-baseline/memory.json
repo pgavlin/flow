@@ -9,27 +9,27 @@
   "samples": [
     {
       "allocated_blocks": 723,
-      "allocated_bytes": 381177,
+      "allocated_bytes": 382353,
       "benchmark": "chapter/import_markdown",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 14947,
+      "live_bytes_at_completion": 15547,
       "peak_live_bytes": 71824
     },
     {
       "allocated_blocks": 12162,
-      "allocated_bytes": 1103045,
+      "allocated_bytes": 1328613,
       "benchmark": "chapter/compose_cold_fonts",
       "live_bytes_after_output_drop": 239680,
-      "live_bytes_at_completion": 505144,
-      "peak_live_bytes": 529491
+      "live_bytes_at_completion": 634680,
+      "peak_live_bytes": 659923
     },
     {
       "allocated_blocks": 29695,
-      "allocated_bytes": 4554247,
+      "allocated_bytes": 5410855,
       "benchmark": "chapter/long_paragraph/compose_cold_fonts",
       "live_bytes_after_output_drop": 58486,
-      "live_bytes_at_completion": 1040404,
-      "peak_live_bytes": 1963704
+      "live_bytes_at_completion": 1531924,
+      "peak_live_bytes": 2456120
     },
     {
       "allocated_blocks": 12,
@@ -41,11 +41,11 @@
     },
     {
       "allocated_blocks": 7301,
-      "allocated_bytes": 750077,
+      "allocated_bytes": 975645,
       "benchmark": "chapter/compose_warm_fonts",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 265464,
-      "peak_live_bytes": 289811
+      "live_bytes_at_completion": 395000,
+      "peak_live_bytes": 420243
     },
     {
       "allocated_blocks": 9,
@@ -57,131 +57,131 @@
     },
     {
       "allocated_blocks": 44598,
-      "allocated_bytes": 4311752,
+      "allocated_bytes": 5197864,
       "benchmark": "paragraph_scratch/many_small",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 1319424,
-      "peak_live_bytes": 1446564
+      "live_bytes_at_completion": 1843712,
+      "peak_live_bytes": 1971748
     },
     {
       "allocated_blocks": 72702,
-      "allocated_bytes": 9283632,
+      "allocated_bytes": 11025488,
       "benchmark": "paragraph_scratch/large_then_small",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 2472030,
-      "peak_live_bytes": 2717834
+      "live_bytes_at_completion": 3487838,
+      "peak_live_bytes": 3734538
     },
     {
-      "allocated_blocks": 640834,
-      "allocated_bytes": 91971480,
+      "allocated_blocks": 640600,
+      "allocated_bytes": 109634302,
       "benchmark": "publication_77_chapters/text/cold_open",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 505289,
-      "peak_live_bytes": 816531
+      "live_bytes_at_completion": 636774,
+      "peak_live_bytes": 1079174
     },
     {
-      "allocated_blocks": 11255,
-      "allocated_bytes": 1800567,
+      "allocated_blocks": 11252,
+      "allocated_bytes": 2027850,
       "benchmark": "publication_77_chapters/text/cached_index_open",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 418747,
-      "peak_live_bytes": 474088
+      "live_bytes_at_completion": 549608,
+      "peak_live_bytes": 604349
     },
     {
-      "allocated_blocks": 690131,
-      "allocated_bytes": 103623507,
+      "allocated_blocks": 687835,
+      "allocated_bytes": 121636901,
       "benchmark": "publication_77_chapters/images/cold_open",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 979701,
-      "peak_live_bytes": 1301451
+      "live_bytes_at_completion": 1243890,
+      "peak_live_bytes": 1698358
     },
     {
-      "allocated_blocks": 19466,
-      "allocated_bytes": 2830179,
+      "allocated_blocks": 19409,
+      "allocated_bytes": 3284716,
       "benchmark": "publication_77_chapters/images/cached_index_open",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 704601,
-      "peak_live_bytes": 725439
+      "live_bytes_at_completion": 968118,
+      "peak_live_bytes": 989852
     },
     {
-      "allocated_blocks": 640834,
-      "allocated_bytes": 91971480,
+      "allocated_blocks": 640600,
+      "allocated_bytes": 109634302,
       "benchmark": "font_environments/shared/77",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 505289,
-      "peak_live_bytes": 816531
+      "live_bytes_at_completion": 636774,
+      "peak_live_bytes": 1079174
     },
     {
-      "allocated_blocks": 1272421,
-      "allocated_bytes": 182924441,
+      "allocated_blocks": 1271956,
+      "allocated_bytes": 218025090,
       "benchmark": "font_environments/shared/154",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 582876,
-      "peak_live_bytes": 894127
+      "live_bytes_at_completion": 714361,
+      "peak_live_bytes": 1156771
     },
     {
-      "allocated_blocks": 2386184,
-      "allocated_bytes": 262675360,
+      "allocated_blocks": 2385950,
+      "allocated_bytes": 270069510,
       "benchmark": "font_environments/shared/unique_tokens",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 4937404,
-      "peak_live_bytes": 5374157
+      "live_bytes_at_completion": 5025881,
+      "peak_live_bytes": 5562801
     },
     {
-      "allocated_blocks": 4830064,
-      "allocated_bytes": 532958001,
+      "allocated_blocks": 4829599,
+      "allocated_bytes": 548858650,
       "benchmark": "font_environments/shared/unique_tokens_154",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 4833062,
-      "peak_live_bytes": 5443653
+      "live_bytes_at_completion": 4921539,
+      "peak_live_bytes": 5490318
     },
     {
-      "allocated_blocks": 642053,
-      "allocated_bytes": 92026735,
+      "allocated_blocks": 641819,
+      "allocated_bytes": 109689605,
       "benchmark": "font_environments/scoped_shared/77",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 520188,
-      "peak_live_bytes": 831526
+      "live_bytes_at_completion": 651673,
+      "peak_live_bytes": 1094169
     },
     {
-      "allocated_blocks": 648678,
-      "allocated_bytes": 92653951,
+      "allocated_blocks": 648444,
+      "allocated_bytes": 110320469,
       "benchmark": "font_environments/scoped_aliases/77",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 560022,
-      "peak_live_bytes": 872091
+      "live_bytes_at_completion": 691507,
+      "peak_live_bytes": 1134734
     },
     {
-      "allocated_blocks": 643464,
-      "allocated_bytes": 92186005,
+      "allocated_blocks": 643230,
+      "allocated_bytes": 109848875,
       "benchmark": "font_environments/alternating/77",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 580000,
-      "peak_live_bytes": 891242
+      "live_bytes_at_completion": 711485,
+      "peak_live_bytes": 1153885
     },
     {
-      "allocated_blocks": 646909,
-      "allocated_bytes": 92562538,
+      "allocated_blocks": 646675,
+      "allocated_bytes": 110225408,
       "benchmark": "font_environments/rotating_four/77",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 720447,
-      "peak_live_bytes": 1031689
+      "live_bytes_at_completion": 851932,
+      "peak_live_bytes": 1294332
     },
     {
-      "allocated_blocks": 643464,
-      "allocated_bytes": 92186009,
+      "allocated_blocks": 643230,
+      "allocated_bytes": 109848879,
       "benchmark": "font_environments/grouped/77",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 580000,
-      "peak_live_bytes": 891338
+      "live_bytes_at_completion": 711485,
+      "peak_live_bytes": 1153981
     },
     {
-      "allocated_blocks": 2387305,
-      "allocated_bytes": 262754081,
+      "allocated_blocks": 2387071,
+      "allocated_bytes": 270148279,
       "benchmark": "font_environments/alternating/unique_tokens",
       "live_bytes_after_output_drop": 0,
-      "live_bytes_at_completion": 4808982,
-      "peak_live_bytes": 5159070
+      "live_bytes_at_completion": 4897459,
+      "peak_live_bytes": 5291946
     }
   ],
   "schema_version": 1
