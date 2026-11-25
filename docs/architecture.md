@@ -158,6 +158,14 @@ navigation, search, selection, resources, and invalidation. The font stack uses
 Fontique, HarfRust, Skrifa, and Swash. Paragraph breaking uses `text_layout`;
 syntax highlighting uses Tree-sitter.
 
+Navigation construction gathers anchors once into node/position groups, retaining
+exact-name alias order. Per-construction geometry lookups use node maps and
+interval sweeps followed by binary searches, rather than scanning the whole
+layout for every target. Overlapping/interleaved table ranges retain their first
+visual-order match; following-line fallback still uses canonical source order.
+These transient lookups do not change IR persistence or the viewer's index-build
+lifecycle. Table-of-contents construction shares the anchor lookup.
+
 Hosts register font bytes. They answer viewer image-resource requests and
 supply surfaces or paint targets. Rendering returns host-readable pixel
 buffers; hosts choose output encodings and own file writes. PNG export lives in

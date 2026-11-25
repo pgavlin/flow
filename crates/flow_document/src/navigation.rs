@@ -13,6 +13,10 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+mod lookups;
+pub(crate) use lookups::AnchorLookup;
+use lookups::{AnchorGroup, GeometryLookup, NavigationLookups};
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum NavigationKind {
     Heading,
@@ -155,6 +159,7 @@ impl NavigationIndex {
             blocks = layout.blocks.len() as u64,
             anchors = document.anchors().len() as u64
         );
+        let lookup = NavigationLookups::new(document, layout);
         let mut targets = Vec::new();
         let mut stack = vec![document.root()];
         while let Some(id) = stack.pop() {
@@ -162,15 +167,17 @@ impl NavigationIndex {
                 .get_node(id)
                 .expect("finalized flow navigation traversal retains valid identities");
             let target = match &node.kind {
-                NodeKind::Heading(_) => flow_heading_target(document, id).map(|mut target| {
-                    let position = target.flow.as_ref().unwrap().position;
-                    target.document_y = flow_geometry(layout, id, position);
-                    target
-                }),
+                NodeKind::Heading(_) => {
+                    flow_heading_target(document, id, &lookup.anchors).map(|mut target| {
+                        let position = target.flow.as_ref().unwrap().position;
+                        target.document_y = lookup.geometry.y(id, position);
+                        target
+                    })
+                }
                 NodeKind::Link(link) => {
                     let mut target = flow_target(
                         document,
-                        layout,
+                        &lookup,
                         id,
                         match link.relation {
                             LinkRelation::Ordinary => NavigationKind::Link,
@@ -190,7 +197,7 @@ impl NavigationIndex {
                 }
                 NodeKind::Preformatted(_) => Some(flow_target(
                     document,
-                    layout,
+                    &lookup,
                     id,
                     NavigationKind::CodeBlock,
                     first_line(&flow_label(document, node.text_range)),
@@ -199,7 +206,7 @@ impl NavigationIndex {
                 )),
                 NodeKind::Table(_) => Some(flow_target(
                     document,
-                    layout,
+                    &lookup,
                     id,
                     NavigationKind::Table,
                     flow_table_label(document, node),
@@ -208,7 +215,7 @@ impl NavigationIndex {
                 )),
                 NodeKind::Image(image) => Some(flow_target(
                     document,
-                    layout,
+                    &lookup,
                     id,
                     NavigationKind::Image,
                     flow_image_label(document, node, image),
@@ -218,7 +225,7 @@ impl NavigationIndex {
                 NodeKind::ListItem(_) if flow_list_item_has_checkbox(document, node) => {
                     Some(flow_target(
                         document,
-                        layout,
+                        &lookup,
                         id,
                         NavigationKind::Task,
                         first_line(&flow_label(document, node.text_range)),
@@ -242,26 +249,15 @@ impl NavigationIndex {
                     .or_insert(index);
             }
         }
-        for (anchor_id, anchor) in document.anchors() {
-            let key = (anchor.target.node, anchor.target.position);
-            if let Some(index) = target_by_position.get(&key).copied()
-                && targets[index]
-                    .flow
-                    .as_ref()
-                    .is_some_and(|flow| flow.position == anchor.target.position)
-            {
-                let anchors = &mut targets[index]
-                    .flow
-                    .as_mut()
-                    .expect("flow target indices retain flow identities")
-                    .anchors;
-                if !anchors.contains(anchor_id) {
-                    anchors.push(anchor_id.clone());
-                }
+        for group in lookup.anchors.groups() {
+            let key = (group.node, group.position);
+            if target_by_position.contains_key(&key) {
+                // Semantic targets already received all aliases for this
+                // position. Do not repeatedly scan/grow the alias vector.
                 continue;
             }
             let index = targets.len();
-            targets.push(flow_anchor_target(document, layout, anchor_id, anchor));
+            targets.push(flow_anchor_target(group, &lookup.geometry));
             target_by_position.insert(key, index);
         }
         for (line, action) in layout
@@ -290,10 +286,7 @@ impl NavigationIndex {
                 flow: Some(FlowNavigationIdentity {
                     node: *definition,
                     position,
-                    anchors: document
-                        .anchors_for(*definition)
-                        .map(|(anchor, _)| anchor.clone())
-                        .collect(),
+                    anchors: lookup.anchors.all_anchors(*definition),
                     destination: None,
                     relation: None,
                     generated_action: Some(action.clone()),
@@ -504,13 +497,14 @@ impl NavigationIndex {
 pub(crate) fn flow_heading_target(
     document: &FlowDocument,
     node_id: NodeId,
+    anchors: &AnchorLookup<'_>,
 ) -> Option<NavigationTarget> {
     let node = document.get_node(node_id)?;
     let NodeKind::Heading(heading) = &node.kind else {
         return None;
     };
     let default_position = FlowTextPosition::new(node.text_range.start, flow::Affinity::Downstream);
-    let (position, anchors) = flow_position_and_anchors(document, node_id, default_position);
+    let (position, anchors) = anchors.position_and_anchors(node_id, default_position);
     Some(NavigationTarget {
         kind: NavigationKind::Heading,
         range: text_range(node.text_range),
@@ -531,7 +525,7 @@ pub(crate) fn flow_heading_target(
 
 fn flow_target(
     document: &FlowDocument,
-    layout: &ContinuousLayout,
+    lookup: &NavigationLookups<'_>,
     node_id: NodeId,
     kind: NavigationKind,
     label: String,
@@ -542,7 +536,9 @@ fn flow_target(
         .get_node(node_id)
         .expect("finalized flow navigation targets retain valid identities");
     let default_position = FlowTextPosition::new(node.text_range.start, flow::Affinity::Downstream);
-    let (position, anchors) = flow_position_and_anchors(document, node_id, default_position);
+    let (position, anchors) = lookup
+        .anchors
+        .position_and_anchors(node_id, default_position);
     NavigationTarget {
         kind,
         range: text_range(node.text_range),
@@ -557,7 +553,7 @@ fn flow_target(
             generated_action: None,
             owned_nodes: vec![node_id],
         }),
-        document_y: flow_geometry(layout, node_id, position),
+        document_y: lookup.geometry.y(node_id, position),
     }
 }
 
@@ -573,35 +569,31 @@ fn flow_owned_nodes(document: &FlowDocument, root: NodeId) -> Vec<NodeId> {
     nodes
 }
 
-fn flow_anchor_target(
-    _document: &FlowDocument,
-    layout: &ContinuousLayout,
-    anchor_id: &flow::AnchorId,
-    anchor: &flow::Anchor,
-) -> NavigationTarget {
-    let offset = anchor.target.position.offset.as_usize();
+fn flow_anchor_target(group: &AnchorGroup<'_>, geometry: &GeometryLookup<'_>) -> NavigationTarget {
+    let offset = group.position.offset.as_usize();
     NavigationTarget {
         kind: NavigationKind::Anchor,
         range: TextRange {
             start: offset,
             end: offset,
         },
-        label: anchor_id.as_str().to_owned(),
+        label: group.aliases[0].as_str().to_owned(),
         heading_level: None,
         flow: Some(FlowNavigationIdentity {
-            node: anchor.target.node,
-            position: anchor.target.position,
-            anchors: vec![anchor_id.clone()],
+            node: group.node,
+            position: group.position,
+            anchors: group.aliases.iter().map(|id| (*id).clone()).collect(),
             destination: None,
             relation: None,
             generated_action: None,
-            owned_nodes: vec![anchor.target.node],
+            owned_nodes: vec![group.node],
         }),
-        document_y: flow_geometry(layout, anchor.target.node, anchor.target.position),
+        document_y: geometry.y(group.node, group.position),
     }
 }
 
-fn flow_geometry(
+#[cfg(test)]
+fn reference_flow_geometry(
     layout: &ContinuousLayout,
     node: NodeId,
     position: FlowTextPosition,
@@ -646,7 +638,8 @@ fn flow_geometry(
         .or_else(|| block.map(|block| block.y))
 }
 
-fn flow_position_and_anchors(
+#[cfg(test)]
+fn reference_flow_position_and_anchors(
     document: &FlowDocument,
     node: NodeId,
     default_position: FlowTextPosition,
@@ -1093,16 +1086,14 @@ mod tests {
             .y;
         assert!(downstream_y > upstream_y);
         assert_eq!(
-            flow_geometry(
-                &layout,
+            GeometryLookup::new(&layout).y(
                 paragraph,
                 FlowTextPosition::new(edge, flow::Affinity::Upstream),
             ),
             Some(upstream_y)
         );
         assert_eq!(
-            flow_geometry(
-                &layout,
+            GeometryLookup::new(&layout).y(
                 paragraph,
                 FlowTextPosition::new(edge, flow::Affinity::Downstream),
             ),

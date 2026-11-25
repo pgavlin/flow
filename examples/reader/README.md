@@ -172,8 +172,12 @@ navigation indexing ~1.36 s across three builds (two empty-layout builds and one
 with 365 blocks / 4,171 anchors). These are observational timings, not test
 thresholds. With one final DOM audit instead of per-chunk rescans, a subsequent
 run measured parsing ~110 ms (final audit ~2.6 ms), total import ~270 ms, and
-window-to-content ~2.77 s. Navigation reconstruction remains unchanged. Tracing
-itself does not change scheduling or optimize those phases.
+window-to-content ~2.77 s. Replacing repeated global navigation scans with
+per-construction anchor/geometry lookups then reduced the three index builds to
+~18 / 18 / 23 ms and window-to-content to ~1.47 s, without changing their lifecycle
+or count. Construction uses a single anchor pass and interval sweeps; geometry
+queries use binary search while preserving visual-order priority for overlapping
+table ranges. Tracing itself does not change scheduling or optimize those phases.
 
 ## Checks
 

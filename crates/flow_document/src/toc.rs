@@ -1,6 +1,6 @@
 use crate::{
     model::{TextRange, flow::FlowDocument},
-    navigation::{NavigationIdentity, NavigationTarget, flow_heading_target},
+    navigation::{AnchorLookup, NavigationIdentity, NavigationTarget, flow_heading_target},
 };
 use std::collections::HashSet;
 #[derive(Clone, Debug)]
@@ -22,10 +22,11 @@ pub struct TocTree {
 
 impl TocTree {
     pub fn new(document: &FlowDocument) -> Self {
+        let anchors = AnchorLookup::new(document);
         Self::from_heading_targets(
             document
                 .preorder(document.root())
-                .filter_map(|id| flow_heading_target(document, id)),
+                .filter_map(|id| flow_heading_target(document, id, &anchors)),
         )
     }
 
