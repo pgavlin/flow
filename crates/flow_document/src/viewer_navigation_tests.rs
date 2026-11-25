@@ -19,9 +19,7 @@ fn parse(source: &str) -> FlowDocument {
 
 fn reader(document: FlowDocument) -> DocumentViewer {
     let mut viewer = DocumentViewer::new("navigation", Settings::default());
-    assert!(viewer.register_font(Arc::from(
-        include_bytes!("../tests/fixtures/fonts/charter.ttf").as_slice()
-    )));
+    assert!(viewer.register_font(Arc::from(crate::test_fonts::fixture("charter.ttf"))));
     viewer.replace_document(Ok(document));
     viewer
 }

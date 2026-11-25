@@ -3254,9 +3254,7 @@ mod tests {
     #[test]
     fn preparing_pagination_settles_pending_mode_and_reflow_anchors_without_painting() {
         let mut viewer = DocumentViewer::new("synthetic", Settings::default());
-        assert!(viewer.register_font(Arc::from(
-            include_bytes!("../tests/fixtures/fonts/charter.ttf").as_slice()
-        )));
+        assert!(viewer.register_font(Arc::from(crate::test_fonts::fixture("charter.ttf"))));
         viewer.replace_document(Ok(parse_document(
             &"Synthetic paragraph with enough text to wrap onto several lines.\n\n".repeat(100),
         )));
@@ -3441,9 +3439,7 @@ mod tests {
             ..Settings::default()
         };
         let mut viewer = DocumentViewer::new("document.md", settings);
-        assert!(viewer.register_font(Arc::from(
-            include_bytes!("../tests/fixtures/fonts/charter.ttf").as_slice()
-        )));
+        assert!(viewer.register_font(Arc::from(crate::test_fonts::fixture("charter.ttf"))));
         viewer.replace_document(Ok(parse_document(source)));
 
         for width in [280, 320, 390, 480, 600] {

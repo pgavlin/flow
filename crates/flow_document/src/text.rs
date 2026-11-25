@@ -380,17 +380,17 @@ impl FontSystem {
         // An explicit fixture set makes renderer tests independent of host fonts.
         #[cfg(any(test, feature = "test-fonts"))]
         for bytes in [
-            include_bytes!("../tests/fixtures/fonts/charter.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/charter-bold.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/charter-italic.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/charter-bold-italic.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/fira-code.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-emoji.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans-arabic.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans-hebrew.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans-devanagari.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans-jp.ttf").as_slice(),
+            crate::test_fonts::fixture("charter.ttf"),
+            crate::test_fonts::fixture("charter-bold.ttf"),
+            crate::test_fonts::fixture("charter-italic.ttf"),
+            crate::test_fonts::fixture("charter-bold-italic.ttf"),
+            crate::test_fonts::fixture("fira-code.ttf"),
+            crate::test_fonts::fixture("noto-emoji.ttf"),
+            crate::test_fonts::fixture("noto-sans.ttf"),
+            crate::test_fonts::fixture("noto-sans-arabic.ttf"),
+            crate::test_fonts::fixture("noto-sans-hebrew.ttf"),
+            crate::test_fonts::fixture("noto-sans-devanagari.ttf"),
+            crate::test_fonts::fixture("noto-sans-jp.ttf"),
         ] {
             collection.register_fonts(Blob::new(Arc::new(bytes)), None);
         }
@@ -1301,7 +1301,7 @@ mod tests {
     fn cap_height_uses_font_metrics_or_uppercase_bounds_and_scales() {
         let mut fonts = FontSystem::default();
         assert!(fonts.register_font(FontResource::from_bytes(Arc::from(
-            include_bytes!("../tests/fixtures/fonts/literata.ttf").as_slice()
+            crate::test_fonts::fixture("literata.ttf")
         ))));
         for family in ["Charter", "Literata"] {
             let mut style = body_style();
@@ -1600,14 +1600,14 @@ mod tests {
             settings.glyph_positioning(),
         );
         for bytes in [
-            include_bytes!("../tests/fixtures/fonts/charter.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-emoji.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans-arabic.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans-hebrew.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans-devanagari.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/noto-sans-jp.ttf").as_slice(),
-            include_bytes!("../tests/fixtures/fonts/fira-code.ttf").as_slice(),
+            crate::test_fonts::fixture("charter.ttf"),
+            crate::test_fonts::fixture("noto-emoji.ttf"),
+            crate::test_fonts::fixture("noto-sans-arabic.ttf"),
+            crate::test_fonts::fixture("noto-sans-hebrew.ttf"),
+            crate::test_fonts::fixture("noto-sans-devanagari.ttf"),
+            crate::test_fonts::fixture("noto-sans.ttf"),
+            crate::test_fonts::fixture("noto-sans-jp.ttf"),
+            crate::test_fonts::fixture("fira-code.ttf"),
         ] {
             assert!(fonts.register_font(FontResource::from_bytes(Arc::from(bytes))));
         }

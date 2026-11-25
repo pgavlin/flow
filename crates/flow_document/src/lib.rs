@@ -16,7 +16,7 @@ pub mod search;
 pub mod selection;
 pub mod syntax;
 pub mod telemetry;
-#[cfg(feature = "test-fonts")]
+#[cfg(all(feature = "render", any(test, feature = "test-fonts")))]
 #[doc(hidden)]
 pub mod test_fonts;
 pub mod toc;

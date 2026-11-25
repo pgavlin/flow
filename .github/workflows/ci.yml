@@ -74,6 +74,10 @@ jobs:
             bytes=$(wc -c < "$archive")
             echo "$archive: $bytes bytes"
             test "$bytes" -le 10000000
+            if tar -tzf "$archive" | grep -Ei '\.(ttf|otf|woff2?)(/|$)'; then
+              echo "::error file=$archive::Font files must not be shipped in crate archives"
+              exit 1
+            fi
           done
 
   msrv:

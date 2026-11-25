@@ -244,7 +244,7 @@ fn rasterization_is_renderer_local_even_when_the_environment_is_shared() {
 #[test]
 fn trimming_context_releases_resource_backing_after_viewer_destruction() {
     let bytes: std::sync::Arc<[u8]> =
-        std::sync::Arc::from(include_bytes!("../../tests/fixtures/fonts/charter.ttf").as_slice());
+        std::sync::Arc::from(crate::test_fonts::fixture("charter.ttf"));
     let weak = std::sync::Arc::downgrade(&bytes);
     let resource = FontResource::from_bytes(bytes);
     let mut context = FontContext::default();

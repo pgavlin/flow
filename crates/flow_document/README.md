@@ -34,7 +34,9 @@ Default features are empty.
 - `html-parser`: internal HTML5 parsing infrastructure, independently testable
   without either adapter; not a public generic HTML importer.
 - `telemetry`: tracing spans and events using the host's subscriber.
-- `test-fonts`: bundled fixture fonts for testing hosts.
+- `test-fonts`: repository fixture fonts for testing hosts, loaded at runtime.
+  Fonts are not included in published crates. Outside the repository, set
+  `FLOW_TEST_FONT_DIR` to a directory containing the repository's font fixtures.
 
 Hosts register fonts explicitly and may supply ordered family preferences;
 default preference lists are empty. On WebAssembly, hosts also register

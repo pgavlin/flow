@@ -1,5 +1,6 @@
 //! Headless rendering with explicitly registered fonts.
 //! Run: cargo run -p flow_document --features render --example render_document -- output.png
+//! Optionally pass a font directory as the second argument (required outside the repository).
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,
@@ -34,14 +35,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         code_fonts: vec!["Fira Code".to_owned()],
         ..RenderSettings::default()
     });
-    // These bundled fonts are demo fixtures. A product host supplies its own.
-    for bytes in [
-        include_bytes!("../tests/fixtures/fonts/charter.ttf").as_slice(),
-        include_bytes!("../tests/fixtures/fonts/charter-bold.ttf").as_slice(),
-        include_bytes!("../tests/fixtures/fonts/charter-italic.ttf").as_slice(),
-        include_bytes!("../tests/fixtures/fonts/charter-bold-italic.ttf").as_slice(),
-        include_bytes!("../tests/fixtures/fonts/fira-code.ttf").as_slice(),
+    // Fonts are host-supplied, not embedded in the published crate.
+    let font_directory = std::env::args_os()
+        .nth(2)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fonts"));
+    for name in [
+        "charter.ttf",
+        "charter-bold.ttf",
+        "charter-italic.ttf",
+        "charter-bold-italic.ttf",
+        "fira-code.ttf",
     ] {
+        let bytes = std::fs::read(font_directory.join(name))?;
         if !renderer.register_font(Arc::from(bytes)) {
             return Err("could not register a demo font".into());
         }
