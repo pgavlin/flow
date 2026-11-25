@@ -12,17 +12,27 @@ use std::{
     collections::HashMap,
 };
 
-use dom_smoothie::dom_query::{Attr, Document, NodeId, TreeNode};
+use dom_query::{Attr, Document, NodeData, NodeId, NodeRef, TreeNode};
 use html5ever::{
     Attribute, QualName,
     tendril::{StrTendril, TendrilSink},
     tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink},
 };
 
-use super::{
-    HTML_NS, MAX_ATTRIBUTES, MAX_DEPTH, MAX_DOM_BYTES, MAX_NODES, MAX_PARSE_VISITS, MAX_SOURCE,
-    PARSE_BATCH_BYTES, WebImportError, check_dom_with_work,
-};
+pub(in crate::formats) const MAX_SOURCE: usize = 2 * 1024 * 1024;
+pub(in crate::formats) const MAX_NODES: usize = 50_000;
+pub(in crate::formats) const MAX_DEPTH: usize = 128;
+const PARSE_BATCH_BYTES: usize = 4096;
+pub(in crate::formats) const MAX_PARSE_VISITS: usize = 8_000_000;
+const MAX_DOM_BYTES: usize = 8 * MAX_SOURCE;
+const MAX_ATTRIBUTES: usize = 4096;
+pub(in crate::formats) const HTML_NS: &str = "http://www.w3.org/1999/xhtml";
+
+#[derive(Debug, thiserror::Error)]
+pub(in crate::formats) enum ParseError {
+    #[error("HTML input exceeds a size, node, depth, or work limit")]
+    TooComplex,
+}
 
 #[derive(Clone, Copy)]
 struct Limits {
@@ -239,12 +249,12 @@ impl BudgetSink {
 
 impl TreeSink for BudgetSink {
     type Handle = Handle;
-    type Output = Result<Document, WebImportError>;
+    type Output = Result<Document, ParseError>;
     type ElemName<'a> = &'a QualName;
 
     fn finish(self) -> Self::Output {
         if self.failed.get() {
-            Err(WebImportError::TooComplex)
+            Err(ParseError::TooComplex)
         } else {
             Ok(self.document)
         }
@@ -418,9 +428,9 @@ impl TreeSink for BudgetSink {
     }
 }
 
-pub(super) fn parse_bounded(source: &str) -> Result<Document, WebImportError> {
+pub(in crate::formats) fn parse_bounded(source: &str) -> Result<Document, ParseError> {
     if source.len() > MAX_SOURCE {
-        return Err(WebImportError::TooComplex);
+        return Err(ParseError::TooComplex);
     }
     let mut parser = html5ever::parse_document(
         BudgetSink::new(Limits::default()),
@@ -442,7 +452,7 @@ pub(super) fn parse_bounded(source: &str) -> Result<Document, WebImportError> {
         parser.process(source[start..end].into());
         let sink = &parser.tokenizer.sink.sink;
         if sink.failed.get() {
-            return Err(WebImportError::TooComplex);
+            return Err(ParseError::TooComplex);
         }
         check_dom_with_work(sink.document.root(), &mut visits)?;
         start = end;
@@ -452,9 +462,94 @@ pub(super) fn parse_bounded(source: &str) -> Result<Document, WebImportError> {
     Ok(document)
 }
 
+pub(in crate::formats) fn check_dom_with_work(
+    root: NodeRef<'_>,
+    visits: &mut usize,
+) -> Result<(), ParseError> {
+    let mut pending = vec![(root, 0)];
+    let mut count = 0;
+    let mut bytes = 0usize;
+    while let Some((node, depth)) = pending.pop() {
+        count += 1;
+        // Inspect borrowed data instead of cloning every attribute vector on
+        // every validation pass. Account attributes as work as well as storage.
+        let (attributes, payload) = node
+            .query(|inner| match &inner.data {
+                NodeData::Element(element) => {
+                    if element.attrs.len() > MAX_ATTRIBUTES {
+                        return (element.attrs.len(), usize::MAX);
+                    }
+                    let bytes =
+                        element
+                            .attrs
+                            .iter()
+                            .fold(element.name.local.len(), |bytes, attr| {
+                                bytes
+                                    .saturating_add(std::mem::size_of::<dom_query::Attr>())
+                                    .saturating_add(attr.name.local.len())
+                                    .saturating_add(
+                                        attr.name.prefix.as_ref().map_or(0, |prefix| prefix.len()),
+                                    )
+                                    .saturating_add(attr.value.len())
+                            });
+                    (element.attrs.len(), bytes)
+                }
+                NodeData::Text { contents } | NodeData::Comment { contents } => (0, contents.len()),
+                NodeData::ProcessingInstruction { target, contents } => {
+                    (0, target.len().saturating_add(contents.len()))
+                }
+                NodeData::Doctype {
+                    name,
+                    public_id,
+                    system_id,
+                } => (
+                    0,
+                    name.len()
+                        .saturating_add(public_id.len())
+                        .saturating_add(system_id.len()),
+                ),
+                _ => (0, 0),
+            })
+            .unwrap_or((0, 0));
+        bytes = bytes
+            .saturating_add(std::mem::size_of::<dom_query::TreeNode>())
+            .saturating_add(payload);
+        *visits = visits.saturating_add(1 + attributes);
+        if *visits > MAX_PARSE_VISITS
+            || count > MAX_NODES
+            || depth > MAX_DEPTH
+            || attributes > MAX_ATTRIBUTES
+            || bytes > MAX_DOM_BYTES
+        {
+            return Err(ParseError::TooComplex);
+        }
+        pending.extend(node.children_it(true).map(|child| (child, depth + 1)));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incremental_parser_bounds_arena_work_and_utf8_batches() {
+        assert!(matches!(
+            parse_bounded(&"<i></i>".repeat(MAX_NODES)),
+            Err(ParseError::TooComplex)
+        ));
+        let source = format!("<p>{}</p>", "字".repeat(PARSE_BATCH_BYTES));
+        let document = parse_bounded(&source).unwrap();
+        assert_eq!(
+            document.select("p").text().as_ref(),
+            "字".repeat(PARSE_BATCH_BYTES)
+        );
+        let mut exhausted = MAX_PARSE_VISITS;
+        assert!(matches!(
+            check_dom_with_work(document.root(), &mut exhausted),
+            Err(ParseError::TooComplex)
+        ));
+    }
 
     fn parser(limits: Limits) -> html5ever::Parser<BudgetSink> {
         html5ever::parse_document(
@@ -487,7 +582,7 @@ mod tests {
             let allocated = sink.document.tree.len();
             parser.process("<template><b><i><p>more<!--comment--></p></template>".into());
             assert_eq!(parser.tokenizer.sink.sink.document.tree.len(), allocated);
-            assert!(matches!(parser.finish(), Err(WebImportError::TooComplex)));
+            assert!(matches!(parser.finish(), Err(ParseError::TooComplex)));
         }
     }
 
@@ -505,7 +600,7 @@ mod tests {
             parser.process(source.into());
             assert!(parser.tokenizer.sink.sink.failed.get());
             assert!(parser.tokenizer.sink.sink.bytes.get() <= 4096);
-            assert!(matches!(parser.finish(), Err(WebImportError::TooComplex)));
+            assert!(matches!(parser.finish(), Err(ParseError::TooComplex)));
         }
         let mut attributes = parser(Limits {
             attributes: 2,
@@ -565,7 +660,7 @@ mod tests {
             }
             roots.extend(node.children_it(false));
         }
-        assert!(matches!(parser.finish(), Err(WebImportError::TooComplex)));
+        assert!(matches!(parser.finish(), Err(ParseError::TooComplex)));
     }
 
     #[test]
@@ -657,7 +752,7 @@ mod tests {
                 let failed = sink.failed.get();
                 let result = parser.finish();
                 if failed {
-                    assert!(matches!(result, Err(WebImportError::TooComplex)));
+                    assert!(matches!(result, Err(ParseError::TooComplex)));
                 }
             }
         }

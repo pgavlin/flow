@@ -5,6 +5,10 @@
 //! a public generic HTML importer, and does not use flow XHTML as an IR.
 
 pub(super) mod lowering;
+#[cfg(feature = "html-parser")]
+// The internal parser can be built/tested without an enabled source adapter.
+#[cfg_attr(not(feature = "web-html"), allow(dead_code))]
+pub(super) mod parser;
 pub(super) mod source;
 pub(crate) mod tree;
 

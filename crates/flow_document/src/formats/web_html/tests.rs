@@ -434,25 +434,6 @@ fn normalization_does_not_guess_that_nested_or_prose_tables_are_layout() {
 }
 
 #[test]
-fn incremental_parser_bounds_arena_work_and_utf8_batches() {
-    assert!(matches!(
-        parse_bounded(&"<i></i>".repeat(MAX_NODES)),
-        Err(WebImportError::TooComplex)
-    ));
-    let source = format!("<p>{}</p>", "字".repeat(PARSE_BATCH_BYTES));
-    let document = parse_bounded(&source).unwrap();
-    assert_eq!(
-        document.select("p").text().as_ref(),
-        "字".repeat(PARSE_BATCH_BYTES)
-    );
-    let mut exhausted = MAX_PARSE_VISITS;
-    assert!(matches!(
-        check_dom_with_work(document.root(), &mut exhausted),
-        Err(WebImportError::TooComplex)
-    ));
-}
-
-#[test]
 fn exposes_extracted_metadata_without_fetching_declared_resources() {
     let source = article("<p>Metadata story.</p>").replace("<head>", "<head><meta property='article:published_time' content='2026-01-02T03:04:05Z'><meta property='article:modified_time' content='2026-01-03T03:04:05Z'><meta property='og:url' content='https://example.test/canonical'><meta property='og:image' content='/cover.png'><link rel='icon' href='/favicon.ico'>");
     let imported = import(

@@ -15,7 +15,6 @@ use url::Url;
 
 mod normalize;
 mod notes;
-mod parser;
 mod responsive;
 mod visibility;
 #[cfg(test)]
@@ -24,11 +23,11 @@ use normalize::{
     normalize_article, normalize_flow_containment, normalize_sequences, repair_before_extraction,
 };
 use notes::{capture_referenced_notes, restore_referenced_notes};
-use parser::parse_bounded;
 use visibility::is_explicitly_hidden;
 
 use super::html::{
     lowering::{self, LoweringOptions, LoweringPolicy},
+    parser::{self, HTML_NS, MAX_DEPTH, MAX_NODES, MAX_SOURCE},
     source::SourceSyntax,
     tree::{
         Attribute, Element, ExpandedName, NodeProvenance, SourceNodeKind, SourceTree, TreeError,
@@ -43,14 +42,6 @@ use crate::model::flow::{
     SemanticRole, SourceNodeIdentity, SourceRetention,
 };
 
-const MAX_SOURCE: usize = 2 * 1024 * 1024;
-const MAX_NODES: usize = 50_000;
-const MAX_DEPTH: usize = 128;
-const PARSE_BATCH_BYTES: usize = 4096;
-const MAX_PARSE_VISITS: usize = 8_000_000;
-const MAX_DOM_BYTES: usize = 8 * MAX_SOURCE;
-const MAX_ATTRIBUTES: usize = 4096;
-const HTML_NS: &str = "http://www.w3.org/1999/xhtml";
 const SOURCE_NODE_ATTRIBUTE: &str = "data-import-source-node";
 
 #[derive(Clone, Debug, Default)]
@@ -709,72 +700,11 @@ fn resolve(reference: &str, base: Option<&Url>) -> Option<Url> {
 }
 
 fn check_dom(root: NodeRef<'_>) -> Result<(), WebImportError> {
-    check_dom_with_work(root, &mut 0)
+    parser::check_dom_with_work(root, &mut 0).map_err(|_| WebImportError::TooComplex)
 }
 
-fn check_dom_with_work(root: NodeRef<'_>, visits: &mut usize) -> Result<(), WebImportError> {
-    let mut pending = vec![(root, 0)];
-    let mut count = 0;
-    let mut bytes = 0usize;
-    while let Some((node, depth)) = pending.pop() {
-        count += 1;
-        // Inspect borrowed data instead of cloning every attribute vector on
-        // every validation pass. Account attributes as work as well as storage.
-        let (attributes, payload) = node
-            .query(|inner| match &inner.data {
-                NodeData::Element(element) => {
-                    if element.attrs.len() > MAX_ATTRIBUTES {
-                        return (element.attrs.len(), usize::MAX);
-                    }
-                    let bytes =
-                        element
-                            .attrs
-                            .iter()
-                            .fold(element.name.local.len(), |bytes, attr| {
-                                bytes
-                                    .saturating_add(std::mem::size_of::<
-                                        dom_smoothie::dom_query::Attr,
-                                    >())
-                                    .saturating_add(attr.name.local.len())
-                                    .saturating_add(
-                                        attr.name.prefix.as_ref().map_or(0, |prefix| prefix.len()),
-                                    )
-                                    .saturating_add(attr.value.len())
-                            });
-                    (element.attrs.len(), bytes)
-                }
-                NodeData::Text { contents } | NodeData::Comment { contents } => (0, contents.len()),
-                NodeData::ProcessingInstruction { target, contents } => {
-                    (0, target.len().saturating_add(contents.len()))
-                }
-                NodeData::Doctype {
-                    name,
-                    public_id,
-                    system_id,
-                } => (
-                    0,
-                    name.len()
-                        .saturating_add(public_id.len())
-                        .saturating_add(system_id.len()),
-                ),
-                _ => (0, 0),
-            })
-            .unwrap_or((0, 0));
-        bytes = bytes
-            .saturating_add(std::mem::size_of::<dom_smoothie::dom_query::TreeNode>())
-            .saturating_add(payload);
-        *visits = visits.saturating_add(1 + attributes);
-        if *visits > MAX_PARSE_VISITS
-            || count > MAX_NODES
-            || depth > MAX_DEPTH
-            || attributes > MAX_ATTRIBUTES
-            || bytes > MAX_DOM_BYTES
-        {
-            return Err(WebImportError::TooComplex);
-        }
-        pending.extend(node.children_it(true).map(|child| (child, depth + 1)));
-    }
-    Ok(())
+fn parse_bounded(source: &str) -> Result<Document, WebImportError> {
+    parser::parse_bounded(source).map_err(|_| WebImportError::TooComplex)
 }
 
 fn local_fragment(reference: &str, source_url: Option<&Url>) -> Option<String> {

@@ -25,7 +25,11 @@ from that model.
 Its public source-tree names remain available as compatibility re-exports.
 Internal `formats::html` supplies the shared syntactic tree, bounded DOM
 construction, source provenance, and structural HTML lowering. It does not
-select lexical policy or a source format's semantic conventions.
+select lexical policy or a source format's semantic conventions. Its optional
+`html-parser` feature supplies a budgeted HTML5 document parser and DOM checks
+using `html5ever` and `dom_query`, independently of Readability. Parser errors,
+budgets, and regression tests live in this shared layer; article extraction,
+normalization, and DOM-to-source-tree adaptation remain web-adapter policy.
 `formats::flow_xhtml` owns the flow format's versions and conventions;
 `formats::epub_xhtml` owns complete-document validation, author stylesheet
 cascading, and semantic import. Adapters explicitly select their content root,

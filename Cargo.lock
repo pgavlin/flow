@@ -509,6 +509,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "cssparser",
+ "dom_query",
  "dom_smoothie",
  "flow_cache",
  "fontique",
