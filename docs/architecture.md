@@ -163,8 +163,14 @@ exact-name alias order. Per-construction geometry lookups use node maps and
 interval sweeps followed by binary searches, rather than scanning the whole
 layout for every target. Overlapping/interleaved table ranges retain their first
 visual-order match; following-line fallback still uses canonical source order.
-These transient lookups do not change IR persistence or the viewer's index-build
-lifecycle. Table-of-contents construction shares the anchor lookup.
+These transient lookups do not change IR persistence. The viewer constructs
+stable semantic navigation once when installing a document, clears only obsolete
+coordinates/generated actions when composition changes, and binds geometry when
+continuous placement becomes available. Labels, identities, anchor aliases, and
+owned-node lists survive reflow; layout-generated note-return targets are refreshed
+only from actions present in the new layout. The semantic index and its bound
+geometry travel with suspended viewer sessions. Table-of-contents construction
+shares the anchor lookup.
 
 Hosts register font bytes. They answer viewer image-resource requests and
 supply surfaces or paint targets. Rendering returns host-readable pixel

@@ -106,6 +106,14 @@ impl<'a> AnchorLookup<'a> {
         &self.groups
     }
 
+    pub fn into_node_anchors(self) -> HashMap<NodeId, Vec<flow::AnchorId>> {
+        self.by_node
+            .into_iter()
+            .map(|(node, anchors)| (node, anchors.aliases.into_iter().cloned().collect()))
+            .collect()
+    }
+
+    #[cfg(test)]
     pub fn all_anchors(&self, node: NodeId) -> Vec<flow::AnchorId> {
         self.by_node.get(&node).map_or_else(Vec::new, |anchors| {
             anchors.aliases.iter().map(|id| (*id).clone()).collect()
@@ -203,20 +211,6 @@ impl RangeLookup {
 
 fn last_position(range: TextRange) -> usize {
     range.end.saturating_sub(1).max(range.start)
-}
-
-pub(super) struct NavigationLookups<'a> {
-    pub anchors: AnchorLookup<'a>,
-    pub geometry: GeometryLookup<'a>,
-}
-
-impl<'a> NavigationLookups<'a> {
-    pub fn new(document: &'a FlowDocument, layout: &'a ContinuousLayout) -> Self {
-        Self {
-            anchors: AnchorLookup::new(document),
-            geometry: GeometryLookup::new(layout),
-        }
-    }
 }
 
 pub(super) struct GeometryLookup<'a> {

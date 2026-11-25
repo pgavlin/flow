@@ -15,7 +15,7 @@ use std::{
 
 mod lookups;
 pub(crate) use lookups::AnchorLookup;
-use lookups::{AnchorGroup, GeometryLookup, NavigationLookups};
+use lookups::{AnchorGroup, GeometryLookup};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum NavigationKind {
@@ -146,20 +146,65 @@ impl NavigationTarget {
     }
 }
 
+fn sort_targets(targets: &mut Vec<NavigationTarget>) {
+    targets.sort_by(|left, right| {
+        left.range
+            .start
+            .cmp(&right.range.start)
+            .then_with(|| {
+                left.flow
+                    .as_ref()
+                    .map(|flow| flow.node.layout_index())
+                    .cmp(&right.flow.as_ref().map(|flow| flow.node.layout_index()))
+            })
+            .then_with(|| navigation_rank(left.kind).cmp(&navigation_rank(right.kind)))
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    targets.dedup_by(|right, left| {
+        right.kind == left.kind
+            && right.range == left.range
+            && right.label == left.label
+            && right.flow == left.flow
+    });
+}
+
+#[cfg(test)]
+fn next_semantic_build_id() -> usize {
+    thread_local! { static NEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+    NEXT.with(|next| {
+        let id = next.get() + 1;
+        next.set(id);
+        id
+    })
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct NavigationIndex {
     targets: Vec<NavigationTarget>,
     headings: Vec<usize>,
+    // Stable aliases needed by layout-generated note-return targets.
+    node_anchors: HashMap<NodeId, Vec<flow::AnchorId>>,
+    geometry_bound: bool,
+    #[cfg(test)]
+    semantic_build_id: usize,
+    #[cfg(test)]
+    geometry_bindings: usize,
 }
 
 impl NavigationIndex {
     pub fn new(document: &FlowDocument, layout: &ContinuousLayout) -> Self {
+        let mut index = Self::from_document(document);
+        index.bind_geometry(document, layout);
+        index
+    }
+
+    /// Construct stable navigation independently of composition or placement.
+    pub(crate) fn from_document(document: &FlowDocument) -> Self {
         let _span = crate::telemetry::phase_span!(
             "flow.navigation.index",
-            blocks = layout.blocks.len() as u64,
             anchors = document.anchors().len() as u64
         );
-        let lookup = NavigationLookups::new(document, layout);
+        let anchors = AnchorLookup::new(document);
         let mut targets = Vec::new();
         let mut stack = vec![document.root()];
         while let Some(id) = stack.pop() {
@@ -167,17 +212,11 @@ impl NavigationIndex {
                 .get_node(id)
                 .expect("finalized flow navigation traversal retains valid identities");
             let target = match &node.kind {
-                NodeKind::Heading(_) => {
-                    flow_heading_target(document, id, &lookup.anchors).map(|mut target| {
-                        let position = target.flow.as_ref().unwrap().position;
-                        target.document_y = lookup.geometry.y(id, position);
-                        target
-                    })
-                }
+                NodeKind::Heading(_) => flow_heading_target(document, id, &anchors),
                 NodeKind::Link(link) => {
                     let mut target = flow_target(
                         document,
-                        &lookup,
+                        &anchors,
                         id,
                         match link.relation {
                             LinkRelation::Ordinary => NavigationKind::Link,
@@ -197,7 +236,7 @@ impl NavigationIndex {
                 }
                 NodeKind::Preformatted(_) => Some(flow_target(
                     document,
-                    &lookup,
+                    &anchors,
                     id,
                     NavigationKind::CodeBlock,
                     first_line(&flow_label(document, node.text_range)),
@@ -206,7 +245,7 @@ impl NavigationIndex {
                 )),
                 NodeKind::Table(_) => Some(flow_target(
                     document,
-                    &lookup,
+                    &anchors,
                     id,
                     NavigationKind::Table,
                     flow_table_label(document, node),
@@ -215,7 +254,7 @@ impl NavigationIndex {
                 )),
                 NodeKind::Image(image) => Some(flow_target(
                     document,
-                    &lookup,
+                    &anchors,
                     id,
                     NavigationKind::Image,
                     flow_image_label(document, node, image),
@@ -225,7 +264,7 @@ impl NavigationIndex {
                 NodeKind::ListItem(_) if flow_list_item_has_checkbox(document, node) => {
                     Some(flow_target(
                         document,
-                        &lookup,
+                        &anchors,
                         id,
                         NavigationKind::Task,
                         first_line(&flow_label(document, node.text_range)),
@@ -249,7 +288,7 @@ impl NavigationIndex {
                     .or_insert(index);
             }
         }
-        for group in lookup.anchors.groups() {
+        for group in anchors.groups() {
             let key = (group.node, group.position);
             if target_by_position.contains_key(&key) {
                 // Semantic targets already received all aliases for this
@@ -257,9 +296,64 @@ impl NavigationIndex {
                 continue;
             }
             let index = targets.len();
-            targets.push(flow_anchor_target(group, &lookup.geometry));
+            targets.push(flow_anchor_target(group));
             target_by_position.insert(key, index);
         }
+        sort_targets(&mut targets);
+        let headings = targets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, target)| (target.kind == NavigationKind::Heading).then_some(index))
+            .collect();
+        Self {
+            targets,
+            headings,
+            node_anchors: anchors.into_node_anchors(),
+            geometry_bound: false,
+            #[cfg(test)]
+            semantic_build_id: next_semantic_build_id(),
+            #[cfg(test)]
+            geometry_bindings: 0,
+        }
+    }
+
+    /// Discard obsolete coordinates/actions, retaining stable semantic targets.
+    pub(crate) fn clear_geometry(&mut self) {
+        if !self.geometry_bound {
+            return;
+        }
+        let previous_len = self.targets.len();
+        self.targets.retain_mut(|target| {
+            if target.generated_action().is_some() {
+                return false;
+            }
+            target.document_y = None;
+            true
+        });
+        if previous_len != self.targets.len() {
+            self.reindex_headings();
+        }
+        self.geometry_bound = false;
+    }
+
+    /// Bind coordinates and refresh only the generated actions present in this layout.
+    pub(crate) fn bind_geometry(&mut self, document: &FlowDocument, layout: &ContinuousLayout) {
+        let _span = crate::telemetry::phase_span!(
+            "flow.navigation.bind_geometry",
+            blocks = layout.blocks.len() as u64
+        );
+        self.clear_geometry();
+        #[cfg(test)]
+        {
+            self.geometry_bindings += 1;
+        }
+        let geometry = GeometryLookup::new(layout);
+        for target in &mut self.targets {
+            if let Some(identity) = &target.flow {
+                target.document_y = geometry.y(identity.node, identity.position);
+            }
+        }
+        let semantic_len = self.targets.len();
         for (line, action) in layout
             .blocks
             .iter()
@@ -275,7 +369,7 @@ impl NavigationIndex {
                 continue;
             };
             let position = FlowTextPosition::new(node.text_range.end, flow::Affinity::Upstream);
-            targets.push(NavigationTarget {
+            self.targets.push(NavigationTarget {
                 kind: NavigationKind::FootnoteReturn,
                 range: TextRange {
                     start: node.text_range.end.as_usize(),
@@ -286,7 +380,11 @@ impl NavigationIndex {
                 flow: Some(FlowNavigationIdentity {
                     node: *definition,
                     position,
-                    anchors: lookup.anchors.all_anchors(*definition),
+                    anchors: self
+                        .node_anchors
+                        .get(definition)
+                        .cloned()
+                        .unwrap_or_default(),
                     destination: None,
                     relation: None,
                     generated_action: Some(action.clone()),
@@ -296,26 +394,28 @@ impl NavigationIndex {
             });
         }
 
-        targets.sort_by(|left, right| {
-            left.range
-                .start
-                .cmp(&right.range.start)
-                .then_with(|| {
-                    left.flow
-                        .as_ref()
-                        .map(|flow| flow.node.layout_index())
-                        .cmp(&right.flow.as_ref().map(|flow| flow.node.layout_index()))
-                })
-                .then_with(|| navigation_rank(left.kind).cmp(&navigation_rank(right.kind)))
-                .then_with(|| left.label.cmp(&right.label))
-        });
-        targets.dedup_by(|right, left| right.identity() == left.identity());
-        let headings = targets
-            .iter()
-            .enumerate()
-            .filter_map(|(index, target)| (target.kind == NavigationKind::Heading).then_some(index))
-            .collect();
-        Self { targets, headings }
+        if self.targets.len() != semantic_len {
+            sort_targets(&mut self.targets);
+            self.reindex_headings();
+        }
+        self.geometry_bound = true;
+    }
+
+    fn reindex_headings(&mut self) {
+        self.headings.clear();
+        self.headings.extend(
+            self.targets
+                .iter()
+                .enumerate()
+                .filter_map(|(index, target)| {
+                    (target.kind == NavigationKind::Heading).then_some(index)
+                }),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn construction_work(&self) -> (usize, usize) {
+        (self.semantic_build_id, self.geometry_bindings)
     }
 
     pub fn targets(&self) -> &[NavigationTarget] {
@@ -525,7 +625,7 @@ pub(crate) fn flow_heading_target(
 
 fn flow_target(
     document: &FlowDocument,
-    lookup: &NavigationLookups<'_>,
+    anchors: &AnchorLookup<'_>,
     node_id: NodeId,
     kind: NavigationKind,
     label: String,
@@ -536,9 +636,7 @@ fn flow_target(
         .get_node(node_id)
         .expect("finalized flow navigation targets retain valid identities");
     let default_position = FlowTextPosition::new(node.text_range.start, flow::Affinity::Downstream);
-    let (position, anchors) = lookup
-        .anchors
-        .position_and_anchors(node_id, default_position);
+    let (position, anchors) = anchors.position_and_anchors(node_id, default_position);
     NavigationTarget {
         kind,
         range: text_range(node.text_range),
@@ -553,7 +651,7 @@ fn flow_target(
             generated_action: None,
             owned_nodes: vec![node_id],
         }),
-        document_y: lookup.geometry.y(node_id, position),
+        document_y: None,
     }
 }
 
@@ -569,7 +667,7 @@ fn flow_owned_nodes(document: &FlowDocument, root: NodeId) -> Vec<NodeId> {
     nodes
 }
 
-fn flow_anchor_target(group: &AnchorGroup<'_>, geometry: &GeometryLookup<'_>) -> NavigationTarget {
+fn flow_anchor_target(group: &AnchorGroup<'_>) -> NavigationTarget {
     let offset = group.position.offset.as_usize();
     NavigationTarget {
         kind: NavigationKind::Anchor,
@@ -588,7 +686,7 @@ fn flow_anchor_target(group: &AnchorGroup<'_>, geometry: &GeometryLookup<'_>) ->
             generated_action: None,
             owned_nodes: vec![group.node],
         }),
-        document_y: geometry.y(group.node, group.position),
+        document_y: None,
     }
 }
 
@@ -848,6 +946,80 @@ mod tests {
             .document;
         index_document(document, width)
     }
+    #[test]
+    fn semantic_targets_survive_geometry_rebinding_and_clearing() {
+        let document = flow_markdown::parse(
+            "# Heading\n\nText [link](#heading), ref[^n].\n\n[^n]: note body",
+            Default::default(),
+        )
+        .unwrap()
+        .document;
+        let styles = document.resolve_styles(StyleContextKey::default());
+        let mut index = NavigationIndex::from_document(&document);
+        let (build, bindings) = index.construction_work();
+        assert_ne!(build, 0);
+        assert_eq!(bindings, 0);
+        let identities: Vec<_> = index
+            .targets()
+            .iter()
+            .map(NavigationTarget::identity)
+            .collect();
+        for (iteration, width) in [90.0, 220.0, 90.0].into_iter().enumerate() {
+            let layout = layout_flow_document(
+                &document,
+                &styles,
+                &FixedMeasurer,
+                &LayoutOptions {
+                    width,
+                    ..Default::default()
+                },
+            );
+            index.bind_geometry(&document, &layout);
+            assert_eq!(index.construction_work(), (build, iteration + 1));
+            let fresh = NavigationIndex::new(&document, &layout);
+            assert_eq!(index.targets(), fresh.targets());
+            for (actual, expected) in index.targets().iter().zip(fresh.targets()) {
+                assert_eq!(actual.document_y, expected.document_y);
+            }
+            index.clear_geometry();
+            assert!(
+                index.targets().iter().all(
+                    |target| target.document_y.is_none() && target.generated_action().is_none()
+                )
+            );
+            assert_eq!(
+                index
+                    .targets()
+                    .iter()
+                    .map(NavigationTarget::identity)
+                    .collect::<Vec<_>>(),
+                identities
+            );
+        }
+        let mut layout = layout_flow_document(
+            &document,
+            &styles,
+            &FixedMeasurer,
+            &LayoutOptions::default(),
+        );
+        for run in layout
+            .blocks
+            .iter_mut()
+            .flat_map(|block| &mut block.lines)
+            .flat_map(|line| &mut line.runs)
+        {
+            run.generated_action = None;
+        }
+        index.bind_geometry(&document, &layout);
+        assert!(
+            index
+                .targets()
+                .iter()
+                .all(|target| target.generated_action().is_none())
+        );
+        assert_eq!(index.construction_work(), (build, 4));
+    }
+
     #[test]
     fn flow_index_uses_semantics_destinations_anchors_and_layout_geometry() {
         let source = "# Head *styled*\n\n[local](#head) [doc](guide.md#part) [web](https://example.com)\n\n- [ ] task\n\n```rs\nfn main() {}\n```\n\n| A | B |\n|---|---|\n| one | two |\n\n![chart](chart.png)\n\nnote[^n]\n\n[^n]: body [back](#fnref-n)";

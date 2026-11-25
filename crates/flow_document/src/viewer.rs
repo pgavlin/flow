@@ -873,12 +873,16 @@ impl DocumentViewer {
             self.visual_selection = false;
             self.selection_preferred_x = None;
         }
-        let navigation = NavigationIndex::new(document, &self.layout);
-        if self
-            .focused
-            .as_ref()
-            .is_some_and(|identity| navigation.target(identity).is_none())
-        {
+        let navigation = NavigationIndex::from_document(document);
+        if self.focused.as_ref().is_some_and(|identity| {
+            // Layout-generated targets are unavailable until placement;
+            // defer their recovery/validation until geometry is bound.
+            navigation.target(identity).is_none()
+                && identity
+                    .flow
+                    .as_ref()
+                    .is_none_or(|flow| flow.generated_action.is_none())
+        }) {
             self.focused = None;
         }
         self.navigation = navigation;
@@ -1170,7 +1174,15 @@ impl DocumentViewer {
             layout
         };
         self.layout = layout;
-        self.navigation = NavigationIndex::new(self.document.as_ref()?, &self.layout);
+        self.navigation
+            .bind_geometry(self.document.as_ref()?, &self.layout);
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|identity| self.navigation.target(identity).is_none())
+        {
+            self.focused = None;
+        }
         self.continuous_key = Some(continuous_key);
         self.revisions.layout = self.revisions.layout.wrapping_add(1);
         Some(())
@@ -1220,7 +1232,7 @@ impl DocumentViewer {
         // composition. Continuous geometry is built only when requested.
         self.layout = Arc::new(ContinuousLayout::default());
         self.continuous_key = None;
-        self.navigation = NavigationIndex::new(document, &self.layout);
+        self.navigation.clear_geometry();
         self.pagination_key = None;
         self.pages = Arc::new(PaginatedLayout::default());
         self.revisions.layout = self.revisions.layout.wrapping_add(1);
@@ -2797,6 +2809,10 @@ fn append_flow_fragment(path: &str, anchor: Option<&flow::AnchorId>) -> String {
 #[cfg(all(test, feature = "test-fonts"))]
 #[path = "viewer_overflow_tests.rs"]
 mod overflow_tests;
+
+#[cfg(test)]
+#[path = "viewer_navigation_tests.rs"]
+mod navigation_tests;
 
 #[cfg(test)]
 mod tests {

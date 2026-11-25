@@ -177,7 +177,12 @@ per-construction anchor/geometry lookups then reduced the three index builds to
 ~18 / 18 / 23 ms and window-to-content to ~1.47 s, without changing their lifecycle
 or count. Construction uses a single anchor pass and interval sweeps; geometry
 queries use binary search while preserving visual-order priority for overlapping
-table ranges. Tracing itself does not change scheduling or optimize those phases.
+table ranges. Separating semantic construction from geometry binding subsequently
+reduced this to one ~17 ms semantic build and one ~6 ms geometry bind; first content
+measured ~1.41 s in that run, with composition still ~583 ms. Reflow/session tests
+verify that semantic target storage is retained while coordinates and generated
+note-return actions follow the current placement. Tracing itself does not change
+scheduling or optimize those phases.
 
 ## Checks
 
