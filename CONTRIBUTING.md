@@ -33,9 +33,25 @@ published together.
 
 1. Update `workspace.package.version` and both internal dependency versions in
    the root `Cargo.toml`. Keep the local `path` entries.
-2. Refresh the workspace and reader lockfiles (`Cargo.lock` and
-   `examples/reader/Cargo.lock`). Commit the changes, merge to `main`, and wait
-   for CI to pass.
+2. After updating the manifest versions, refresh both lockfiles from the
+   repository root:
+
+   ```sh
+   cargo update --workspace
+   cargo update --workspace --manifest-path examples/reader/Cargo.toml
+   git diff -- Cargo.lock examples/reader/Cargo.lock
+   ```
+
+   These commands update the local package versions in `Cargo.lock` and
+   `examples/reader/Cargo.lock`, preserving existing third-party dependency
+   versions where possible. The reader declares its own workspace, so the root
+   command does not update its lockfile. Both lockfiles should record the new
+   versions of `flow_cache`, `flow_document`, and `flow_publication`.
+
+   Do not use `--locked` for this step: the lockfiles need to change. Avoid a
+   plain `cargo update`, which would also upgrade unrelated dependencies.
+   Review the diff, commit the manifest and lockfile changes, merge to `main`,
+   and wait for CI to pass.
 3. From a clean checkout of the release commit, run:
 
    ```sh
