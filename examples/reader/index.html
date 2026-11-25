@@ -30,11 +30,16 @@
 </nav>
 <main><canvas id="reader" tabindex="0" aria-label="Rendered document; P toggles pagination, arrow keys change pages or documents, Page Up and Page Down scroll or turn pages"></canvas></main>
 <script type="module">
-  import init, { command, open_file, open_response } from './pkg/flow_demo_reader.js';
+  import init, { command, open_file, open_response, url_request } from './pkg/flow_demo_reader.js';
   const status = document.querySelector('#status');
   const file = document.querySelector('#file');
   let request = 0;
   let fetching;
+  function requestPlan(url) {
+    const plan = url_request(url);
+    try { return { request_url: plan.request_url, source_url: plan.source_url, wikipedia: plan.wikipedia }; }
+    finally { plan.free(); }
+  }
   function nextRequest() { fetching?.abort(); return ++request; }
   async function boundedBody(response) {
     const limit = 64 * 1024 * 1024;
@@ -74,12 +79,26 @@
       try {
         const url = new URL(document.querySelector('#url').value);
         if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Use an HTTP(S) URL without credentials');
-        status.textContent = 'Fetching…';
-        const response = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        let plan = requestPlan(url.href);
+        const fetchDocument = async (plan) => {
+          status.textContent = plan.wikipedia ? 'Fetching Wikipedia Parsoid HTML…' : 'Fetching…';
+          const response = await fetch(plan.request_url, { credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response;
+        };
+        let response = await fetchDocument(plan);
+        if (!plan.wikipedia) {
+          const redirected = requestPlan(response.url);
+          if (redirected.wikipedia) {
+            await response.body?.cancel();
+            plan = redirected;
+            response = await fetchDocument(plan);
+          }
+        }
+        const source = plan.wikipedia ? plan.source_url : response.url;
         const bytes = await boundedBody(response);
         if (token === request) {
-          open_response(response.url, response.headers.get('content-type') || '', bytes);
+          open_response(source, response.headers.get('content-type') || '', bytes);
           document.querySelector('#reader').focus();
         }
       } catch (error) {

@@ -928,6 +928,29 @@ mod tests {
     }
 
     #[test]
+    fn table_fragments_cover_non_monotonic_cell_text_ranges() {
+        let mut block = table_with_headers(0.0, vec![10.0, 10.0, 10.0], 0, 0);
+        // Three visual lines interleave two cells' canonical text. Neither
+        // endpoint line provides the full source envelope.
+        for (line, (start, end)) in block.lines.iter_mut().zip([(20, 25), (0, 40), (10, 15)]) {
+            line.range = TextRange { start, end };
+        }
+        block.range = TextRange { start: 0, end: 40 };
+        let document = composed_from_layout(&layout(vec![block], 30.0));
+        let input = build_page_items(&document);
+        let plan = break_page_items(&input, 100.0).unwrap();
+        let paginated = materialize_paginated_layout(&document, &input, &plan).unwrap();
+        assert_eq!(
+            paginated.pages[0].source_range,
+            Some(TextRange { start: 0, end: 40 })
+        );
+        assert_eq!(
+            validate_paginated_layout(&document, &input, &paginated),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn oversized_table_rows_use_named_emergency_fragments() {
         let source = layout(vec![table(0.0, vec![10.0, 60.0], 0)], 70.0);
         let document = composed_from_layout(&source);

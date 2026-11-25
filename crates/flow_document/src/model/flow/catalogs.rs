@@ -403,6 +403,8 @@ pub enum GeneratedReason {
     FootnoteLabel,
     MetadataPrologue,
     UnsupportedFallback,
+    /// An otherwise empty link received an importer-generated reading label.
+    LinkLabel,
 }
 
 /// Consumer policy for source bytes after import.

@@ -26,6 +26,13 @@ Default features are empty.
 - `serde`: serialization of core text-position evidence and fingerprints.
 - `web-html`: experimental host-fed web article extraction into the flow IR;
   no networking. Available without rendering; see `formats::web_html` for limits.
+- `mediawiki-html`: host-fed expanded Parsoid HTML 2.8.0, including page metadata,
+  sections, responsive images, and fixture-backed Cite/Math semantics. Independent
+  of `web-html` and Readability; no fetching or wikitext expansion. Document and
+  explicit body-fragment modes are available without rendering. See
+  `formats::mediawiki_html` and the `import_mediawiki` example.
+- `html-parser`: internal HTML5 parsing infrastructure, independently testable
+  without either adapter; not a public generic HTML importer.
 - `telemetry`: tracing spans and events using the host's subscriber.
 - `test-fonts`: bundled fixture fonts for testing hosts.
 

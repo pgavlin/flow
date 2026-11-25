@@ -75,9 +75,14 @@ fallbacks do not. Invalid candidates are omitted with diagnostics without losing
 valid neighbors. Shared lowering only invokes an adapter-selected hook; legacy
 XML adapters retain single-resource behavior. Builder validation covers all
 candidate resource references and nonempty, consistently described candidate
-sets with positive, unique descriptors. Semantic cache codec version 3 preserves
-these choices. Selection, condition evaluation, and resource fetching remain
+sets with positive, unique descriptors. Semantic cache codec version 4 preserves
+these choices and generated link-label provenance. Selection, condition evaluation, and resource fetching remain
 consumer/host policy; existing renderers continue using the fallback.
+Imported image dimensions are used per node without eagerly requesting metadata
+for every sized image. Display-sized pixel replies retain other cached sizes and
+other images; only replacing a resource\'s source pixels invalidates its derived
+variants. This is derived-cache correctness, not HTTP caching policy. Composition
+codec version 3 invalidates artifacts from the previous dimension behavior.
 Rejected image resources retain their alternative text. Display math and other flow
 content are split out of phrasing wrappers rather than flattened or inserted into
 invalid inline IR. Layout-table conversion requires explicit presentation intent;
@@ -98,13 +103,47 @@ importer or test-time network operation. Remaining hardening includes
 global allocation accounting and interruptible extraction-work quotas.
 Responsive selection/rendering is separate from preserving alternatives in IR.
 
+The optional `mediawiki-html` adapter is an independent Parsoid DOM 2.8.0
+pipeline, enabling only the shared HTML5 parser, URL handling, and JSON metadata
+dependencies—not `web-html` or Readability. It supports explicit document and
+body-fragment modes; fragments require a caller-supplied expected version.
+Document version declarations must agree with one another and any expected
+version. It returns typed database-title, category/sort-key, language-link, and
+redirect metadata separately from the reading tree. No redirect following,
+wikitext/template expansion, CSS execution, or resource acquisition occurs.
+The host supplies document URL separately from identity. An explicit resource
+base overrides a document base resolved against that URL; fragment-only links
+remain local. Relative references stay relative without a usable base.
+MediaWiki-owned DOM adaptation preserves expanded content and responsive image
+choices, interprets RDFa tokens with prefix rebinding, and confines Cite/Math
+interpretation to supported extension boundaries. Unknown extensions fall back
+to ordinary HTML with diagnostics. Script/style/template and explicit HTML
+`hidden` subtrees are omitted; arbitrary CSS visibility is not evaluated.
+Cite call-site anchors, note-body roles, and multiple backlinks survive; missing
+local targets are diagnosed. Math uses documented `data-mw.body.extsrc` TeX and
+display metadata, consuming its fallback subtree once. Mixed phrasing/flow
+extension output is split locally while retaining anchors, language, and inline
+runs. Empty external autonumber links receive article-order labels with
+`GeneratedReason::LinkLabel` provenance; semantic codec version 4 covers the new
+reason. An offline Wikipedia revision capture pins real Parsoid 2.8.0 Cite/Math
+shapes (including 100 formulas), with attribution/license notes; it is excluded
+from the published crate. Synthetic contract tests cover recovery and incomplete
+markup, and a rendering/cache test exercises imported semantics. This is not a
+claim of support for all extensions or browser-equivalent wiki presentation.
+
 Constructed trees can retain original node identities, omit unknown serialized
 ranges, and associate generated nodes with their original constructs. HTML
 provenance refers to the original `text/html` source, never a normalized
 serialization. Default construction budgets bound nodes, depth, attributes, and
 text/attribute data while adapting a DOM; each parser integration must also
 bound its own input and construction work. XML retains its existing lexical limits.
-Publication resource resolution remains in `flow_publication`.
+Publication resource resolution remains in `flow_publication`. The example
+reader explicitly selects MediaWiki import for saved `.mw.html` files and
+Parsoid response profiles. Its shared desktop/browser host URL resolver requests
+Parsoid HTML for Wikipedia article URLs (including revision requests), retaining
+the article URL as the source/link base and honoring known initial fragments.
+Other hosts are not guessed to be MediaWiki; ordinary HTML keeps its web
+extraction path. This provider-specific acquisition never runs in either importer.
 
 With `render`, text shaping and paragraph composition produce continuous
 layouts and page fragments. `DocumentViewer` coordinates presentation,

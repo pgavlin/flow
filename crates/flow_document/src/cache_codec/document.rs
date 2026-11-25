@@ -21,8 +21,8 @@ use crate::{
 };
 
 // Version 2 added HTML provenance; version 3 adds responsive image choices.
-pub const SEMANTIC_CODEC_VERSION: u32 = 3;
-pub const COMPOSITION_CODEC_VERSION: u32 = 2;
+pub const SEMANTIC_CODEC_VERSION: u32 = 4;
+pub const COMPOSITION_CODEC_VERSION: u32 = 3;
 pub const PAGINATION_CODEC_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

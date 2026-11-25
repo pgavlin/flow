@@ -12,6 +12,8 @@ pub mod flow_xhtml;
 mod html;
 #[path = "markdown_flow.rs"]
 pub mod markdown;
+#[cfg(feature = "mediawiki-html")]
+pub mod mediawiki_html;
 #[cfg(feature = "web-html")]
 pub mod web_html;
 pub mod xhtml;

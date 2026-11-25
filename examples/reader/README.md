@@ -1,7 +1,8 @@
 # Tiny flow reader host
 
 One window (or browser canvas), one open publication, continuous or paginated reading.
-Opens Markdown, **flow semantic XHTML**, EPUB, and experimental web articles.
+Opens Markdown, **flow semantic XHTML**, EPUB, expanded MediaWiki/Parsoid DOM,
+and experimental web articles.
 No library, persistence, TOC/search/settings panels, or application framework.
 
 ## Desktop
@@ -91,23 +92,55 @@ limit redirects to five on desktop, time out after 30 seconds, and enforce byte
 limits. This demo is not an SSRF isolation boundary: explicitly opening web content
 allows requests from the host's network.
 
-## Web import spike
+## Host-owned HTML routing
 
-Responses dispatch by Content-Type, not URL suffix: `text/html` and
-`application/xhtml+xml` use article extraction, `text/markdown`, `text/x-markdown`,
-and `text/plain` use Markdown import, and `application/epub+zip` uses EPUB import.
+Wikipedia article/view URLs automatically request Parsoid HTML through the
+wiki's `/api/rest_v1/page/html/{title}` endpoint. Desktop and browser shells use
+the same Rust URL resolver. It recognizes the actual Wikipedia hostname
+(including language/mobile subdomains), not substring lookalikes; it also checks
+the destination of an ordinary HTTP redirect. `oldid` requests fetch the given
+revision, and known fragment targets become the initial reading location.
+The article URL—not the API URL—is supplied as the document's link/resource
+base. Edit, diff, search, and other non-article URL forms are not rewritten.
+Direct Wikipedia REST HTML URLs keep their request URL but use an article base.
+Fetch/import errors are surfaced; there is no silent fallback to Readability.
+Desktop HTTP connections are pooled. A per-open-book, byte-bounded encoded
+resource cache avoids downloading the same image separately for metadata and
+pixels (64 MiB FIFO eviction is this demo host\'s policy, not an engine policy).
+Images with imported dimensions do not trigger whole-article metadata fetches;
+visible image pixels are requested as needed. Browser requests still require
+CORS. No engine importer performs this routing
+or networking, and other MediaWiki sites are not automatically redirected to an
+API.
+
+For any host, an HTML response with a Parsoid Content-Type profile, such as
+`text/html; profile="https://www.mediawiki.org/wiki/Specs/HTML/2.8.0"`, selects
+the independent MediaWiki importer. The profile's version must agree with any
+document declaration. Wikipedia-routed responses without a profile must still
+declare a supported DOM version. Unsupported/conflicting versions are errors.
+
+Other responses dispatch by Content-Type, not URL suffix: `text/html` and
+`application/xhtml+xml` use web article extraction; `text/markdown`,
+`text/x-markdown`, and `text/plain` use Markdown; `application/epub+zip` uses EPUB.
 Unsupported or missing response media types are errors. Declared HTTP charsets
-are decoded by the host (default UTF-8). Local files still dispatch by extension:
-`.html`/`.htm` are web articles; `.xhtml` is flow semantic XHTML.
+are decoded by the host (default UTF-8).
 
-The optional engine `web-html` feature uses a native Readability implementation,
-content-preservation repairs, and shared HTML lowering directly into flow IR.
-No XHTML intermediate or engine networking is involved. Input HTML is limited to
-2 MiB, with node/depth checks before extraction; the third-party HTML parser does
-allocate before those checks. This is a spike, not yet a hardened general web
-importer. Math preservation is limited to existing TeX annotations; full math
-recovery, complete note semantics, responsive images, and original byte-offset
-tracking remain future work.
+Local `.mw.html`/`.mw.htm` files explicitly select MediaWiki document import and
+must declare their DOM version. Ordinary `.html`/`.htm` files remain web
+articles; `.xhtml` remains flow semantic XHTML. Saved files do not acquire an
+original document URL from their filename: absolute/protocol-relative resources
+and same-page URLs may need a host-supplied URL to resolve fully. This UI imports
+complete documents, not body fragments. The database title is used only as a
+window/document label; categories and other wiki metadata have no UI.
+
+The independent `web-html` and `mediawiki-html` adapters both lower directly
+through shared HTML infrastructure to flow IR. Only the web adapter runs
+Readability extraction/normalization; expanded wiki content, Cite notes, Math,
+and responsive alternatives use the MediaWiki adapter's policies. No XHTML
+intermediate or engine networking is involved. Both reuse the shared budgeted
+HTML5 parser (2 MiB input limit); these construction budgets are not a
+process-wide allocation quota. Exact HTML byte offsets, browser CSS fidelity,
+and responsive selection/rendering are not implemented.
 
 ## Checks
 

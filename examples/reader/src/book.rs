@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
 use flow_publication::{
     document::{
-        formats::{flow_xhtml, markdown, web_html},
+        formats::{flow_xhtml, markdown, mediawiki_html, web_html},
         model::flow::{Destination, DocumentReference, SourceRetention},
         viewer::{FontResource, ImagePixels},
     },
@@ -21,17 +21,28 @@ use flow_publication::{
 use std::{io::Cursor, sync::Arc};
 use url::Url;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod http;
+#[cfg(not(target_arch = "wasm32"))]
+use http::{EncodedResources, http_client};
+mod wikipedia;
+#[cfg(target_arch = "wasm32")]
+pub use wikipedia::UrlRequest;
+pub use wikipedia::url_request;
+
 pub const MAX_INPUT: usize = 64 * 1024 * 1024;
 const MAX_DOCUMENT: usize = 16 * 1024 * 1024;
 const MAX_RESOURCE: usize = 16 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
 
-pub const WELCOME: &str = "# flow demo\n\nOpen a Markdown document, web HTML, flow semantic XHTML, or EPUB. Pass an HTTP(S) URL on the desktop command line, or use the browser URL field (requires CORS).\n\n- **Ctrl/Cmd+O**: open (or drop a file on the desktop window)\n- **P**: toggle continuous / paginated reading\n- **Wheel, Space, Page Up/Down**: scroll or turn pages\n- **Left/Right**: previous/next page (or EPUB document in continuous mode)\n- **Alt+Left** or **Backspace**: back\n- **Ctrl/Cmd + / −**: font size\n\nClick document links to follow them. This demo has no library, persistence, or settings screen. Desktop web documents can fetch HTTP(S) images; browser URL import currently loads article text but not remote images.\n\nIn a browser, use the Open button. EPUB images and fonts are self-contained; an uploaded standalone file cannot read neighboring files on your disk.";
+pub const WELCOME: &str = "# flow demo\n\nOpen a Markdown document, web HTML, MediaWiki/Parsoid DOM (.mw.html), flow semantic XHTML, or EPUB. Pass an HTTP(S) URL on the desktop command line, or use the browser URL field (requires CORS). Wikipedia article URLs automatically request Parsoid HTML; other web pages use article extraction.\n\n- **Ctrl/Cmd+O**: open (or drop a file on the desktop window)\n- **P**: toggle continuous / paginated reading\n- **Wheel, Space, Page Up/Down**: scroll or turn pages\n- **Left/Right**: previous/next page (or EPUB document in continuous mode)\n- **Alt+Left** or **Backspace**: back\n- **Ctrl/Cmd + / −**: font size\n\nClick document links to follow them. This demo has no library, persistence, or settings screen. Desktop web documents can fetch HTTP(S) images; browser URL import currently loads article text but not remote images.\n\nIn a browser, use the Open button. EPUB images and fonts are self-contained; an uploaded standalone file cannot read neighboring files on your disk.";
 
 pub struct Book {
     pub title: String,
     pub model: Publication,
     input: Input,
+    #[cfg(not(target_arch = "wasm32"))]
+    encoded_resources: std::cell::RefCell<EncodedResources>,
 }
 enum Input {
     Epub(EpubPublication),
@@ -49,6 +60,7 @@ enum ContentFormat {
     Markdown,
     FlowXhtml,
     WebHtml,
+    MediaWikiHtml(Option<mediawiki_html::MediaWikiHtmlVersion>),
 }
 
 impl ContentFormat {
@@ -63,7 +75,38 @@ impl ContentFormat {
         {
             "application/epub+zip" => Ok(Self::Epub),
             "text/markdown" | "text/x-markdown" | "text/plain" => Ok(Self::Markdown),
-            "text/html" | "application/xhtml+xml" => Ok(Self::WebHtml),
+            "text/html" | "application/xhtml+xml" => {
+                let mut version = None;
+                // Only an explicit Parsoid media profile selects the wiki adapter.
+                // Do not infer it from a host name, URL suffix, or body markup.
+                for parameter in value.split(';').skip(1) {
+                    let Some((key, profiles)) = parameter.trim().split_once('=') else {
+                        continue;
+                    };
+                    if !key.trim().eq_ignore_ascii_case("profile") {
+                        continue;
+                    }
+                    for profile in profiles.trim().trim_matches('"').split_ascii_whitespace() {
+                        let declared = [
+                            "https://www.mediawiki.org/wiki/Specs/HTML/",
+                            "http://www.mediawiki.org/wiki/Specs/HTML/",
+                        ]
+                        .into_iter()
+                        .find_map(|prefix| profile.strip_prefix(prefix));
+                        if let Some(declared) = declared {
+                            let declared = declared
+                                .parse()
+                                .context("Invalid Parsoid Content-Type profile")?;
+                            ensure!(
+                                version.is_none_or(|previous| previous == declared),
+                                "Conflicting Parsoid Content-Type profiles"
+                            );
+                            version = Some(declared);
+                        }
+                    }
+                }
+                Ok(version.map_or(Self::WebHtml, |version| Self::MediaWikiHtml(Some(version))))
+            }
             _ => bail!("Unsupported response Content-Type: {value}"),
         }
     }
@@ -78,8 +121,17 @@ impl Book {
             Some("epub") => ContentFormat::Epub,
             Some("md" | "markdown") => ContentFormat::Markdown,
             Some("xhtml") => ContentFormat::FlowXhtml,
-            Some("html" | "htm") => ContentFormat::WebHtml,
-            _ => bail!("Choose .md, .markdown, .xhtml (flow XHTML), .html, or .epub"),
+            Some("html" | "htm") => {
+                let name = name.to_ascii_lowercase();
+                if name.ends_with(".mw.html") || name.ends_with(".mw.htm") {
+                    ContentFormat::MediaWikiHtml(None)
+                } else {
+                    ContentFormat::WebHtml
+                }
+            }
+            _ => bail!(
+                "Choose .md, .markdown, .xhtml (flow XHTML), .html, .mw.html (Parsoid), or .epub"
+            ),
         };
         Self::from_content(name, bytes, generation, format, None, None)
     }
@@ -92,7 +144,12 @@ impl Book {
         generation: u64,
     ) -> Result<Self> {
         let url = external_url(url)?;
-        let format = ContentFormat::for_content_type(content_type)?;
+        let mut format = ContentFormat::for_content_type(content_type)?;
+        if format == ContentFormat::WebHtml && url_request(url.as_str())?.wikipedia {
+            // A host-routed Wikipedia response must be Parsoid, even if its
+            // profile header is absent. Version metadata is still required.
+            format = ContentFormat::MediaWikiHtml(None);
+        }
         Self::from_content(
             url.as_str(),
             bytes,
@@ -127,6 +184,8 @@ impl Book {
                 title: name.into(),
                 model,
                 input: Input::Epub(input),
+                #[cfg(not(target_arch = "wasm32"))]
+                encoded_resources: Default::default(),
             });
         }
         ensure!(
@@ -161,6 +220,23 @@ impl Book {
                 )?
                 .document
             }
+            ContentFormat::MediaWikiHtml(expected_version) => {
+                let imported = mediawiki_html::import(
+                    &text,
+                    mediawiki_html::MediaWikiOptions {
+                        source_url: resource_base,
+                        identity,
+                        expected_version,
+                        ..Default::default()
+                    },
+                )?;
+                // Database title is a window/document label, not a synthesized
+                // display heading. Other wiki metadata has no UI in this demo.
+                if let Some(database_title) = imported.metadata.database_title {
+                    title = database_title;
+                }
+                imported.content.document
+            }
             ContentFormat::WebHtml => {
                 let imported = web_html::import(
                     &text,
@@ -178,6 +254,19 @@ impl Book {
             ContentFormat::Epub => unreachable!(),
         };
         let document_key = DocumentKey::new("document")?;
+        let start = source_url
+            .as_ref()
+            .and_then(Url::fragment)
+            .map(|fragment| percent_encoding::percent_decode_str(fragment).decode_utf8())
+            .transpose()?
+            .map(|fragment| {
+                flow_publication::document::model::flow::AnchorId::new(fragment.into_owned())
+            })
+            .filter(|anchor| document.anchor(anchor).is_some())
+            .map(|anchor| PublicationTarget {
+                document: document_key.clone(),
+                anchor: Some(anchor),
+            });
         let model = Publication::new(PublicationDescription {
             key,
             revision: PublicationRevision::new(format!("resident-{generation}"))?,
@@ -193,11 +282,13 @@ impl Book {
             reading_order: vec![document_key],
             navigation: Vec::new(),
             resources: Vec::new(),
-            start: None,
+            start,
         })?;
         Ok(Self {
             title,
             model,
+            #[cfg(not(target_arch = "wasm32"))]
+            encoded_resources: Default::default(),
             input: Input::Single {
                 document: ImportedDocument::new(document),
                 web_url: source_url,
@@ -209,13 +300,24 @@ impl Book {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_url(url: &str, generation: u64) -> Result<Self> {
-        let response = fetch_http(url, MAX_INPUT)?;
-        Self::from_response(
-            &response.url,
-            &response.content_type,
-            response.bytes,
-            generation,
-        )
+        let mut plan = url_request(url)?;
+        let mut response = fetch_http(&plan.request_url, MAX_INPUT)
+            .context("Could not fetch document (Wikipedia articles request Parsoid HTML)")?;
+        if !plan.wikipedia {
+            // Recognize a Wikipedia article reached through an HTTP redirect.
+            let redirected = url_request(&response.url)?;
+            if redirected.wikipedia {
+                response = fetch_http(&redirected.request_url, MAX_INPUT)
+                    .context("Could not fetch redirected Wikipedia article as Parsoid HTML")?;
+                plan = redirected;
+            }
+        }
+        let source = if plan.wikipedia {
+            &plan.source_url
+        } else {
+            &response.url
+        };
+        Self::from_response(source, &response.content_type, response.bytes, generation)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -258,12 +360,12 @@ impl Book {
 
     pub fn resource(&self, request: &ResourceRequest) -> Result<PreparedResource> {
         self.check_scope(&request.publication, &request.revision)?;
-        let bytes = match (&self.input, &request.resource) {
+        let bytes: Arc<[u8]> = match (&self.input, &request.resource) {
             (Input::Epub(input), ResourceReference::Publication(key)) => {
-                input.resource_by_key(key)?
+                input.resource_by_key(key)?.into()
             }
             (_, ResourceReference::Host(reference)) if reference.starts_with("data:") => {
-                decode_data_image(reference)?
+                decode_data_image(reference)?.into()
             }
             #[cfg(not(target_arch = "wasm32"))]
             (
@@ -274,7 +376,17 @@ impl Book {
                 ResourceReference::Host(reference),
             ) => {
                 let url = base.join(reference)?;
-                fetch_http(url.as_str(), MAX_RESOURCE)?.bytes
+                let key = url.to_string();
+                let cached = self.encoded_resources.borrow().get(&key);
+                if let Some(bytes) = cached {
+                    bytes
+                } else {
+                    let bytes: Arc<[u8]> = fetch_http(&key, MAX_RESOURCE)?.bytes.into();
+                    self.encoded_resources
+                        .borrow_mut()
+                        .insert(key, Arc::clone(&bytes));
+                    bytes
+                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             (
@@ -282,7 +394,7 @@ impl Book {
                     path: Some(path), ..
                 },
                 ResourceReference::Host(reference),
-            ) => read_bounded(&adjacent_path(path, reference)?, MAX_RESOURCE)?,
+            ) => read_bounded(&adjacent_path(path, reference)?, MAX_RESOURCE)?.into(),
             _ => bail!(
                 "Resource unavailable: remote images require the desktop host; browser uploads cannot read neighboring files"
             ),
@@ -292,9 +404,7 @@ impl Book {
             "Resource exceeds the 16 MiB demo limit"
         );
         match request.kind {
-            ResourceKind::Font => Ok(PreparedResource::Font(FontResource::from_bytes(Arc::from(
-                bytes,
-            )))),
+            ResourceKind::Font => Ok(PreparedResource::Font(FontResource::from_bytes(bytes))),
             ResourceKind::ImageMetadata => {
                 let reader = image_reader(&bytes)?;
                 let (width, height) = reader.into_dimensions()?;
@@ -515,11 +625,7 @@ fn fetch_http(reference: &str, limit: usize) -> Result<HttpInput> {
         url.username().is_empty() && url.password().is_none(),
         "Credentials in URLs are not supported"
     );
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .user_agent("flow-demo-reader/0.0 (web import spike)")
-        .build()?;
+    let client = http_client()?;
     let response = client.get(url).send()?.error_for_status()?;
     let url = response.url().to_string();
     external_url(&url)?;

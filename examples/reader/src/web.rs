@@ -60,6 +60,33 @@ pub fn open_response(url: String, content_type: String, bytes: Vec<u8>) -> Resul
     Ok(())
 }
 
+/// The browser uses the same pure host URL resolver as desktop fetching.
+#[wasm_bindgen]
+pub struct UrlRequest(crate::book::UrlRequest);
+
+#[wasm_bindgen]
+impl UrlRequest {
+    #[wasm_bindgen(getter)]
+    pub fn request_url(&self) -> String {
+        self.0.request_url.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn source_url(&self) -> String {
+        self.0.source_url.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn wikipedia(&self) -> bool {
+        self.0.wikipedia
+    }
+}
+
+#[wasm_bindgen]
+pub fn url_request(url: &str) -> Result<UrlRequest, JsValue> {
+    crate::book::url_request(url)
+        .map(UrlRequest)
+        .map_err(|error| JsValue::from_str(&format!("{error:#}")))
+}
+
 fn ensure_size(size: usize) -> Result<()> {
     ensure!(
         size <= crate::book::MAX_INPUT,

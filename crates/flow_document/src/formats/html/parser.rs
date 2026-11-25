@@ -429,19 +429,38 @@ impl TreeSink for BudgetSink {
 }
 
 pub(in crate::formats) fn parse_bounded(source: &str) -> Result<Document, ParseError> {
+    parse(source, false)
+}
+
+/// Parse explicitly in an HTML body context, not a guessed document context.
+#[cfg_attr(not(feature = "mediawiki-html"), allow(dead_code))]
+pub(in crate::formats) fn parse_body_fragment(source: &str) -> Result<Document, ParseError> {
+    parse(source, true)
+}
+
+fn parse(source: &str, fragment: bool) -> Result<Document, ParseError> {
     if source.len() > MAX_SOURCE {
         return Err(ParseError::TooComplex);
     }
-    let mut parser = html5ever::parse_document(
-        BudgetSink::new(Limits::default()),
-        html5ever::ParseOpts {
-            tree_builder: html5ever::tree_builder::TreeBuilderOpts {
-                scripting_enabled: false,
-                ..Default::default()
-            },
+    let sink = BudgetSink::new(Limits::default());
+    let options = html5ever::ParseOpts {
+        tree_builder: html5ever::tree_builder::TreeBuilderOpts {
+            scripting_enabled: false,
             ..Default::default()
         },
-    );
+        ..Default::default()
+    };
+    let mut parser = if fragment {
+        html5ever::parse_fragment(
+            sink,
+            options,
+            QualName::new(None, HTML_NS.into(), "body".into()),
+            Vec::new(),
+            false,
+        )
+    } else {
+        html5ever::parse_document(sink, options)
+    };
     let mut start = 0;
     let mut visits = 0;
     while start < source.len() {
@@ -549,6 +568,18 @@ mod tests {
             check_dom_with_work(document.root(), &mut exhausted),
             Err(ParseError::TooComplex)
         ));
+    }
+
+    #[test]
+    fn body_fragments_keep_body_recovery_and_namespaces() {
+        let document = parse_body_fragment("<title>body title</title><p>A&nbsp;B<table>fostered<tr><td>cell</table><svg><title>svg</title></svg>").unwrap();
+        assert!(document.select("body").nodes().is_empty());
+        assert!(document.select("head").nodes().is_empty());
+        assert!(document.root().text().contains("A\u{00a0}B"));
+        assert!(document.root().text().contains("fostered"));
+        assert_eq!(document.select("td").text().as_ref(), "cell");
+        assert!(parse_body_fragment("").is_ok());
+        assert!(parse_body_fragment(&"<div>".repeat(MAX_DEPTH + 1)).is_err());
     }
 
     fn parser(limits: Limits) -> html5ever::Parser<BudgetSink> {

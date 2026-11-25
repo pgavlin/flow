@@ -1,5 +1,20 @@
 # Document test fixtures
 
+## MediaWiki DOM capture
+
+`mediawiki/` contains a pinned real Parsoid 2.8.0 article revision. See its
+[README](mediawiki/README.md) for the source, revision, checksum, attribution,
+license, and supported Cite/Math markup contracts. No setup or network access is
+required; the development-only capture is excluded from the published crate.
+
+```sh
+cargo test -p flow_document --no-default-features --features mediawiki-html
+```
+
+This runs adapter contract tests, XML importer fingerprints, and the pinned
+article test. `--all-features` also exercises rendering and semantic-cache
+round trips.
+
 ## Readability corpus
 
 `readability/` is an unmodified Git submodule of

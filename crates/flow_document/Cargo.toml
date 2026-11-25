@@ -16,12 +16,17 @@ include = [
     "README.md",
     "LICENSE",
     "!tests/fixtures/readability/**",
+    "!tests/fixtures/mediawiki/**",
 ]
 keywords = ["reading", "document", "epub", "typography"]
 categories = ["text-processing", "rendering"]
 
 [package.metadata.docs.rs]
 features = ["render"]
+
+[[example]]
+name = "import_mediawiki"
+required-features = ["mediawiki-html"]
 
 [[example]]
 name = "render_document"
@@ -33,6 +38,8 @@ default = []
 html-parser = ["dep:dom_query", "dep:html5ever"]
 # Experimental host-fed web article extraction (no networking).
 web-html = ["html-parser", "dep:dom_smoothie", "dep:url"]
+# Host-fed expanded Parsoid DOM; independent of web article extraction.
+mediawiki-html = ["html-parser", "dep:url", "dep:serde_json"]
 render = [
     "dep:flow_cache",
     "serde",

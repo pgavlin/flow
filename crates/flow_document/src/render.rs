@@ -382,6 +382,16 @@ impl Renderer {
                 continue;
             };
             if let Some(resource) = document.get_resource(image.resource) {
+                let request = images.request(&resource.identity, document.resource_base());
+                if let Some(size) = image.intrinsic_size
+                    && images.hint_dimensions(
+                        request,
+                        size.width.get().ceil() as u32,
+                        size.height.get().ceil() as u32,
+                    )
+                {
+                    continue;
+                }
                 images.measure(&resource.identity, document.resource_base());
             }
         }
@@ -2879,6 +2889,18 @@ impl TextMeasurer for RenderMeasurer<'_> {
         resource_base: Option<&str>,
         intrinsic_size: Option<(f32, f32)>,
     ) -> ImageMetrics {
+        // Node-specific dimensions remain authoritative even when another use
+        // of this resource (or its decoded bitmap) has a different natural size.
+        if let Some((width, height)) = intrinsic_size {
+            let mut images = self.images.borrow_mut();
+            let request = images.request(identity, resource_base);
+            images.hint_dimensions(request.clone(), width.ceil() as u32, height.ceil() as u32);
+            return ImageMetrics {
+                key: request.key(),
+                width,
+                height,
+            };
+        }
         let measured = self.images.borrow_mut().measure(identity, resource_base);
         measured.unwrap_or_else(|| {
             let request = self.images.borrow().request(identity, resource_base);

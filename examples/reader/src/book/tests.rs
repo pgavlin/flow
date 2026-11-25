@@ -443,6 +443,160 @@ fn html_files_and_responses_render_as_extracted_articles() {
     }
 }
 
+fn parsoid_article() -> String {
+    r##"<html><head><meta property="mw:htmlVersion" content="2.8.0"><title>Wiki database title</title></head><body><nav>Keep wiki content</nav><section><h2 id="detail">Detail</h2><p>Article text <span typeof="mw:Extension/math" data-mw='{"name":"math","body":{"extsrc":"x^2"}}'>Duplicate math</span><sup id="ref" typeof="mw:Extension/ref"><a href="#note">[1]</a></sup></p><ol typeof="mw:Extension/references"><li id="note"><span class="mw-cite-backlink"><a href="#ref">Back</a></span>Note body</li></ol></section></body></html>"##.into()
+}
+
+#[test]
+fn parsoid_files_and_profiled_responses_use_direct_import_and_render() {
+    let profile =
+        "text/html; charset=utf-8; profile=\"https://www.mediawiki.org/wiki/Specs/HTML/2.8.0\"";
+    for book in [
+        Book::from_bytes("saved.MW.HTML", parsoid_article().into_bytes(), 1).unwrap(),
+        Book::from_response(
+            "https://example.test/article",
+            profile,
+            parsoid_article().into_bytes(),
+            2,
+        )
+        .unwrap(),
+        Book::from_response(
+            "https://en.wikipedia.org/wiki/Article#detail",
+            "text/html",
+            parsoid_article().into_bytes(),
+            3,
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(book.title, "Wiki database title");
+        let mut session = open(&book);
+        let document = session.viewer().active_document().unwrap();
+        assert!(document.text().as_str().contains("Keep wiki content"));
+        assert!(!document.text().as_str().contains("Duplicate math"));
+        let kinds: Vec<_> = document
+            .preorder(document.root())
+            .map(|id| &document.get_node(id).unwrap().kind)
+            .collect();
+        assert!(kinds.iter().any(|kind| matches!(kind, NodeKind::Section)));
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, NodeKind::Math(math) if math.source == "x^2"))
+        );
+        assert!(kinds.iter().any(|kind| matches!(kind, NodeKind::Link(link) if matches!(link.relation, flow_publication::document::model::flow::LinkRelation::NoteReference { .. }))));
+        let mut pixels = PixelBuffer::new(400, 240, [255; 3]).unwrap();
+        session
+            .render_into(&mut pixels.surface_mut(), 400, 240, 1.0)
+            .unwrap();
+        assert!(
+            pixels
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] != [255; 3])
+        );
+    }
+    let book = Book::from_response(
+        "https://en.wikipedia.org/wiki/Article#detail",
+        profile,
+        parsoid_article().into_bytes(),
+        4,
+    )
+    .unwrap();
+    assert_eq!(
+        book.model
+            .start()
+            .unwrap()
+            .anchor
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "detail"
+    );
+}
+
+#[test]
+fn parsoid_version_errors_do_not_fall_back_to_readability() {
+    let profile = "text/html; profile=\"https://www.mediawiki.org/wiki/Specs/HTML/2.8.0\"";
+    let conflicting = parsoid_article().replace("2.8.0", "2.9.0");
+    assert!(
+        Book::from_response(
+            "https://example.test/article",
+            profile,
+            conflicting.into_bytes(),
+            1
+        )
+        .is_err()
+    );
+    assert!(Book::from_bytes("article.mw.html", b"<p>No version</p>".to_vec(), 2).is_err());
+    assert!(
+        Book::from_response(
+            "https://en.wikipedia.org/wiki/Article",
+            "text/html",
+            web_article().into_bytes(),
+            3
+        )
+        .is_err()
+    );
+    assert!(
+        ContentFormat::for_content_type(
+            "text/html; profile=\"https://www.mediawiki.org/wiki/Specs/HTML/not-a-version\""
+        )
+        .is_err()
+    );
+    assert!(ContentFormat::for_content_type("text/html; profile=\"https://www.mediawiki.org/wiki/Specs/HTML/2.8.0 https://www.mediawiki.org/wiki/Specs/HTML/2.9.0\"").is_err());
+    assert_eq!(
+        ContentFormat::for_content_type("text/html; profile=\"https://unrelated.test/profile\"")
+            .unwrap(),
+        ContentFormat::WebHtml
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn remote_image_metadata_and_pixels_share_one_download() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut request = [0; 4096];
+        let count = stream.read(&mut request).unwrap();
+        assert!(
+            std::str::from_utf8(&request[..count])
+                .unwrap()
+                .starts_with("GET /image.gif ")
+        );
+        let bytes = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/gif\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+        stream.write_all(bytes).unwrap();
+        // The listener closes here. A second download cannot succeed.
+    });
+    let book = Book::from_response(
+        &format!("http://{address}/article"),
+        "text/markdown",
+        b"![Image](/image.gif)".to_vec(),
+        1,
+    )
+    .unwrap();
+    let mut session = open(&book);
+    thread.join().unwrap();
+    let mut pixels = PixelBuffer::new(400, 240, [255; 3]).unwrap();
+    session
+        .render_into(&mut pixels.surface_mut(), 400, 240, 1.0)
+        .unwrap();
+    service(&book, &mut session);
+    assert!(
+        book.encoded_resources
+            .borrow()
+            .get(&format!("http://{address}/image.gif"))
+            .is_some()
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn url_fetch_follows_redirects_and_dispatches_final_content_type() {

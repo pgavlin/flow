@@ -258,6 +258,22 @@ impl ImageCache {
         self.scaled_image_bytes = 0;
     }
 
+    fn remove_scaled_image(&mut self, id: u64) {
+        let keys: Vec<_> = self
+            .scaled_images
+            .iter()
+            .filter(|(key, _)| key.0 == id)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            if let Some(pixels) = self.scaled_images.pop(&key) {
+                self.scaled_image_bytes = self
+                    .scaled_image_bytes
+                    .saturating_sub(pixels.retained_bytes());
+            }
+        }
+    }
+
     fn cache_scaled(&mut self, key: (u64, u32, u32), pixels: Arc<ImagePixels>) {
         let bytes = pixels.retained_bytes();
         if bytes > SCALED_IMAGE_CACHE_BUDGET {
@@ -317,11 +333,13 @@ impl ImageCache {
         let key = request.key();
         let id = self.allocate_image_id();
         self.use_clock = self.use_clock.wrapping_add(1);
-        self.clear_scaled_images();
-        if let Some(previous) = self.images.remove(&key).and_then(|image| image.pixels) {
-            self.source_image_bytes = self
-                .source_image_bytes
-                .saturating_sub(previous.retained_bytes());
+        if let Some(previous) = self.images.remove(&key) {
+            self.remove_scaled_image(previous.id);
+            if let Some(pixels) = previous.pixels {
+                self.source_image_bytes = self
+                    .source_image_bytes
+                    .saturating_sub(pixels.retained_bytes());
+            }
         }
         self.source_image_bytes += pixels.retained_bytes();
         self.images.insert(
@@ -337,6 +355,22 @@ impl ImageCache {
             },
         );
         self.evict_source_images();
+        true
+    }
+
+    /// Imported intrinsic dimensions let sized images request visible pixels
+    /// without fetching metadata for every image in the document first.
+    /// A hint never replaces dimensions already supplied by the host.
+    pub fn hint_dimensions(&mut self, request: ImageRequest, width: u32, height: u32) -> bool {
+        if !valid_dimensions(width, height) {
+            return false;
+        }
+        let id = self.allocate_image_id();
+        let image = self
+            .images
+            .entry(request.key())
+            .or_insert_with(|| CachedImage::unknown(id, request));
+        image.dimensions.get_or_insert((width, height));
         true
     }
 
@@ -369,17 +403,10 @@ impl ImageCache {
         let key = request.key();
         let id = self.allocate_image_id();
         self.use_clock = self.use_clock.wrapping_add(1);
-        self.clear_scaled_images();
         let mut image = self
             .images
             .remove(&key)
             .unwrap_or_else(|| CachedImage::unknown(id, request.clone()));
-        if let Some(previous) = image.pixels.take() {
-            self.source_image_bytes = self
-                .source_image_bytes
-                .saturating_sub(previous.retained_bytes());
-        }
-        image.id = id;
         let dimensions_changed = image.dimensions.is_none();
         image.dimensions.get_or_insert(decoded_dimensions);
         image.request = request.clone();
@@ -392,10 +419,20 @@ impl ImageCache {
             && request.desired_height == Some(decoded_dimensions.1);
         if sized_response {
             self.cache_scaled(
-                (id, decoded_dimensions.0, decoded_dimensions.1),
+                (image.id, decoded_dimensions.0, decoded_dimensions.1),
                 Arc::clone(&pixels),
             );
         } else {
+            // A new source replaces this resource's variants only. Display-sized
+            // replies above retain the resource identity, its other sizes, and
+            // every other image on the page.
+            self.remove_scaled_image(image.id);
+            if let Some(previous) = image.pixels.take() {
+                self.source_image_bytes = self
+                    .source_image_bytes
+                    .saturating_sub(previous.retained_bytes());
+            }
+            image.id = id;
             self.source_image_bytes += pixels.retained_bytes();
             image.last_source_use = self.use_clock;
             image.pixels = Some(pixels);
@@ -671,6 +708,45 @@ mod tests {
         assert_eq!(cache.scaled_image_bytes, 800 * 400 * 4);
         assert!(cache.scaled_pixels(&key, 800, 400).is_some());
         assert!(cache.take_pixel_requests().is_empty());
+    }
+
+    #[test]
+    fn multiple_sized_images_and_variants_do_not_evict_each_other() {
+        let mut cache = ImageCache::default();
+        let a = ImageRequest::new("a.png", None);
+        let b = ImageRequest::new("b.png", None);
+        assert!(cache.provide_metadata(a.clone(), 100, 100));
+        assert!(cache.provide_metadata(b.clone(), 100, 100));
+        for (request, size) in [(&a, 20), (&b, 30), (&a, 40)] {
+            assert!(cache.scaled_pixels(&request.key(), size, size).is_none());
+            let pending = cache.take_pixel_requests().pop().unwrap();
+            assert_eq!(
+                cache.provide_pixels(pending, RgbaImage::new(size, size)),
+                Some(false)
+            );
+        }
+        for _ in 0..3 {
+            for (request, size) in [(&a, 20), (&b, 30), (&a, 40)] {
+                assert!(cache.scaled_pixels(&request.key(), size, size).is_some());
+            }
+            assert!(cache.take_pixel_requests().is_empty());
+        }
+        assert_eq!(cache.scaled_image_bytes, (20 * 20 + 30 * 30 + 40 * 40) * 4);
+        assert!(cache.register(a.clone(), RgbaImage::new(100, 100)));
+        assert!(cache.scaled_pixels(&b.key(), 30, 30).is_some());
+        assert!(cache.take_pixel_requests().is_empty());
+        assert_eq!(cache.scaled_images.len(), 1);
+        let source_variant = cache.scaled_pixels(&a.key(), 50, 50).unwrap();
+        assert_eq!(
+            cache.provide_pixels(a.for_pixels(60, 60), RgbaImage::new(60, 60)),
+            Some(false)
+        );
+        assert_eq!(cache.source_image_bytes, 100 * 100 * 4);
+        assert!(Arc::ptr_eq(
+            &source_variant,
+            &cache.scaled_pixels(&a.key(), 50, 50).unwrap()
+        ));
+        assert!(cache.scaled_pixels(&b.key(), 30, 30).is_some());
     }
 
     #[test]

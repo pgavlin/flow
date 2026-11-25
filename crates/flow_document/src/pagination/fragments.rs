@@ -481,10 +481,9 @@ pub fn materialize_paginated_layout(
                 }
                 let first = &block.lines[line_start];
                 let last = &block.lines[line_index - 1];
-                let range = TextRange {
-                    start: first.range.start,
-                    end: last.range.end,
-                };
+                // Table lines are ordered geometrically, not by canonical text:
+                // adjacent columns can interleave ranges from different cells.
+                let range = line_source_range(&block.lines[line_start..line_index]);
                 let fragment_y = content_offset + block_y + first.y - block.y - selected.start;
                 let height = last.y + last.height - first.y;
                 include_source(&mut source_range, range);
@@ -784,10 +783,9 @@ pub fn validate_paginated_layout(
                     }
                     let first_layout_line = &block.layout.lines[fragment.line_start];
                     let last_layout_line = &block.layout.lines[fragment.line_end - 1];
-                    let expected_range = TextRange {
-                        start: first_layout_line.range.start,
-                        end: last_layout_line.range.end,
-                    };
+                    let expected_range = line_source_range(
+                        &block.layout.lines[fragment.line_start..fragment.line_end],
+                    );
                     let block_y = input
                         .block_y(fragment.block)
                         .ok_or(FragmentValidationError::PagePlanMismatch)?;
@@ -1332,6 +1330,13 @@ fn owner_page(segments: &[super::sequence::SelectedBreak], start: f32, end: f32)
                 && (end <= page.end + GEOMETRY_TOLERANCE || start < page.end + GEOMETRY_TOLERANCE))
                 .then_some(candidate + 1)
         })
+    }
+}
+
+fn line_source_range(lines: &[crate::layout::LineLayout]) -> TextRange {
+    TextRange {
+        start: lines.iter().map(|line| line.range.start).min().unwrap(),
+        end: lines.iter().map(|line| line.range.end).max().unwrap(),
     }
 }
 

@@ -50,6 +50,7 @@ jobs:
       - run: cargo test --locked --workspace --features render
       - run: cargo test --locked -p flow_document --features render --example render_document
       - run: cargo test --locked -p flow_document --no-default-features
+      - run: cargo test --locked -p flow_document --no-default-features --features mediawiki-html
       - run: cargo test --locked -p flow_cache
       - run: cargo test --locked -p flow_publication --no-default-features
       - run: cargo check --locked --workspace --all-targets --all-features
@@ -110,6 +111,7 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - run: rustup target add wasm32-unknown-unknown
+      - run: cargo check --locked -p flow_document --no-default-features --features mediawiki-html --target wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: examples/reader -> target

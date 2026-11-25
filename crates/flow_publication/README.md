@@ -68,6 +68,8 @@ consumer-facing capabilities:
   bounded resource access. Does not acquire archive bytes.
 - `render`: `ReadingSession`, document rendering and layout-artifact support;
   does not enable `epub` or publication Serde derives.
+- `mediawiki-html`: enables the independent expanded Parsoid DOM importer under
+  `document::formats::mediawiki_html`; no wiki fetching or publication adapter.
 - `telemetry`: tracing instrumentation using the host's subscriber.
 
 Hosts store cache bytes opaquely and supply exact dependency digests to the

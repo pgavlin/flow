@@ -14,7 +14,8 @@ crate-type = ["cdylib", "rlib"]
 anyhow = "1"
 base64 = "0.22"
 encoding_rs = "0.8"
-flow_publication = { path = "../../crates/flow_publication", features = ["render", "epub", "web-html"] }
+percent-encoding = "2"
+flow_publication = { path = "../../crates/flow_publication", features = ["render", "epub", "web-html", "mediawiki-html"] }
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 url = "2.5"
