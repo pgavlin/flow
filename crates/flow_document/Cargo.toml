@@ -8,7 +8,15 @@ description = "Portable semantic document, reflow, pagination, and rendering eng
 license = "MIT AND Bitstream-Charter AND OFL-1.1"
 repository.workspace = true
 readme = "README.md"
-include = ["src/**", "examples/**", "tests/fixtures/**", "README.md", "LICENSE"]
+# The upstream test corpus is obtained via Git, not shipped in the crate archive.
+include = [
+    "src/**",
+    "examples/**",
+    "tests/fixtures/**",
+    "README.md",
+    "LICENSE",
+    "!tests/fixtures/readability/**",
+]
 keywords = ["reading", "document", "epub", "typography"]
 categories = ["text-processing", "rendering"]
 

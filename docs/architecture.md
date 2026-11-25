@@ -73,9 +73,12 @@ row-group-spanning zero row spans without changing the legacy XML adapters'
 default lowering behavior.
 Malformed ruby and specialized list/table structures recover to readable content
 with diagnostics. Original-element identities survive extraction and repair
-carriers without inventing serialized ranges. A pinned synthetic Readability
-fixture subset runs offline; an external-corpus evaluator separates native
-extraction differences from pipeline differences. Remaining hardening includes
+carriers without inventing serialized ranges. A Git submodule pins the upstream
+Readability corpus: all 130 cases run as an offline IR-construction test, with
+strict semantic comparisons for a selected subset and a full-corpus difference
+report separating native extraction differences from pipeline differences.
+Submodule initialization is an explicit development/CI setup step, never an
+importer or test-time network operation. Remaining hardening includes
 global allocation accounting and interruptible extraction-work quotas; the
 separate responsive-image IR design does not block single-resource import.
 

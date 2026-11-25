@@ -2,14 +2,17 @@
 #![cfg(feature = "web-html")]
 #![allow(
     clippy::disallowed_methods,
-    reason = "Integration-test host reads pinned fixtures and an explicitly selected external corpus"
+    reason = "Integration-test host reads fixtures from the pinned Readability submodule"
 )]
 #![allow(
     clippy::print_stderr,
-    reason = "Explicit corpus-report test emits investigation results under --nocapture"
+    reason = "Corpus comparisons emit investigation results under --nocapture"
 )]
 
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use dom_smoothie::dom_query::{Document, NodeRef};
 use flow_document::{
@@ -29,6 +32,16 @@ const PINNED_CASES: &[&str] = &[
     "remove-script-tags",
     "replace-brs",
 ];
+
+fn corpus_root() -> PathBuf {
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/readability/test/test-pages");
+    assert!(
+        root.join("basic-tags-cleaning/source.html").is_file(),
+        "Readability corpus is missing; run `git submodule update --init --recursive` from the repository root"
+    );
+    root
+}
 
 fn compact(value: &str) -> String {
     value.chars().filter(|c| !c.is_whitespace()).collect()
@@ -267,7 +280,7 @@ fn compare_case(root: &Path, name: &str) -> Vec<String> {
 
 #[test]
 fn pinned_readability_semantics() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/readability");
+    let root = corpus_root();
     let failures: Vec<_> = PINNED_CASES
         .iter()
         .filter_map(|name| {
@@ -278,16 +291,12 @@ fn pinned_readability_semantics() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Evaluate the complete pinned checkout locally without redistributing captured
-/// third-party articles. Differences are reported by semantic dimension; they
-/// are investigation results, not silently accepted baselines.
+/// Every pinned corpus input must construct valid IR. Differences against the
+/// reference HTML are reported separately, not treated as extraction failures.
 #[test]
-#[ignore = "set FLOW_READABILITY_CORPUS to the pinned upstream test/test-pages directory"]
-fn external_readability_corpus_report() {
-    let root =
-        std::env::var_os("FLOW_READABILITY_CORPUS").expect("FLOW_READABILITY_CORPUS is required");
-    let root = Path::new(&root);
-    let mut cases: Vec<_> = std::fs::read_dir(root)
+fn readability_corpus_imports() {
+    let root = corpus_root();
+    let mut cases: Vec<_> = std::fs::read_dir(&root)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
@@ -300,7 +309,7 @@ fn external_readability_corpus_report() {
         if !root.join(name).join("expected.html").exists() {
             continue;
         }
-        let differences = compare_case(root, name);
+        let differences = compare_case(&root, name);
         import_errors += usize::from(
             differences
                 .iter()
@@ -314,7 +323,7 @@ fn external_readability_corpus_report() {
         }
     }
     eprintln!("Readability semantic comparison: {matched} matching, {different} differing");
-    assert!(matched + different > 0, "no corpus cases found");
+    assert_eq!(matched + different, 130, "pinned corpus case count changed");
     assert_eq!(
         import_errors, 0,
         "corpus inputs must not fail IR construction"

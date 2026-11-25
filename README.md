@@ -30,6 +30,17 @@ the reader. Its README includes browser build instructions.
 
 ## Development
 
+Initialize the pinned test-corpus submodule before running tests with `web-html`
+(or `--all-features`):
+
+```sh
+git submodule update --init --recursive
+```
+
+Cloning with `git clone --recurse-submodules` also initializes it. Tests do not
+fetch the corpus or linked page resources themselves. See the
+[fixture notes](crates/flow_document/tests/fixtures/README.md).
+
 ```sh
 cargo lint
 cargo lint --all # also run the feature matrix and lint regression suites
