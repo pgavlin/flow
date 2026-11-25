@@ -45,7 +45,10 @@ bytes are bounded, and a budgeted HTML5 tree sink checks node allocations,
 logical depth (including detached template fragments), attributes, accounted DOM
 storage, and sink operations before mutation. Rejected creations use inert named
 handles until the current bounded tokenizer batch finishes; failed trees never
-become import results. Subtree reparenting cannot bypass depth checks. These are
+become import results. Batch boundaries check only the sink failure flag, not
+the accumulated DOM. A single linear audit after EOF processing shares the
+construction work quota; its cost is traced as `flow.html.validate`. Independent
+DOM checks remain available for adapters that subsequently transform the DOM. Subtree reparenting cannot bypass depth checks. These are
 DOM construction budgets, not a process-wide allocator quota: tokenizer scratch,
 allocator capacity/overhead, and native extraction's internal execution time are
 not directly interruptible by this boundary.
@@ -142,6 +145,10 @@ reader explicitly selects MediaWiki import for saved `.mw.html` files and
 Parsoid response profiles. Its shared desktop/browser host URL resolver requests
 Parsoid HTML for Wikipedia article URLs (including revision requests), retaining
 the article URL as the source/link base and honoring known initial fragments.
+Its opt-in desktop `telemetry` feature installs a host-owned subscriber for
+engine/host phase spans and records queue wait plus window/open-to-first-present
+milestones. Default reader builds install no subscriber; the engine only emits
+feature-gated spans and never configures logging or export.
 Other hosts are not guessed to be MediaWiki; ordinary HTML keeps its web
 extraction path. This provider-specific acquisition never runs in either importer.
 

@@ -150,6 +150,11 @@ pub struct NavigationIndex {
 
 impl NavigationIndex {
     pub fn new(document: &FlowDocument, layout: &ContinuousLayout) -> Self {
+        let _span = crate::telemetry::phase_span!(
+            "flow.navigation.index",
+            blocks = layout.blocks.len() as u64,
+            anchors = document.anchors().len() as u64
+        );
         let mut targets = Vec::new();
         let mut stack = vec![document.root()];
         while let Some(id) = stack.pop() {

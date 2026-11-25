@@ -4,7 +4,9 @@
 //! TreeSink cannot return allocation errors. Rejected creations therefore get
 //! inert, named handles while mutations become no-ops. This lets the current
 //! tokenizer batch finish without panicking or inserting sentinel nodes into the
-//! DOM. No rejected tree is ever finalized as a document.
+//! DOM. No rejected tree is ever finalized as a document. Construction accounts
+//! for mutations incrementally; one final linear audit shares its work budget.
+//! Tokenizer batch boundaries never trigger whole-DOM validation walks.
 
 use std::{
     borrow::Cow,
@@ -254,10 +256,14 @@ impl TreeSink for BudgetSink {
 
     fn finish(self) -> Self::Output {
         if self.failed.get() {
-            Err(ParseError::TooComplex)
-        } else {
-            Ok(self.document)
+            return Err(ParseError::TooComplex);
         }
+        // EOF processing can still mutate the sink. Audit only here, after all
+        // tree-builder work, and charge the single walk to the same work quota.
+        let _span = crate::telemetry::phase_span!("flow.html.validate");
+        let mut visits = self.operations.get();
+        check_dom_with_limits(self.document.root(), &mut visits, self.limits)?;
+        Ok(self.document)
     }
 
     fn parse_error(&self, _message: Cow<'static, str>) {
@@ -462,7 +468,6 @@ fn parse(source: &str, fragment: bool) -> Result<Document, ParseError> {
         html5ever::parse_document(sink, options)
     };
     let mut start = 0;
-    let mut visits = 0;
     while start < source.len() {
         let mut end = (start + PARSE_BATCH_BYTES).min(source.len());
         while !source.is_char_boundary(end) {
@@ -473,18 +478,36 @@ fn parse(source: &str, fragment: bool) -> Result<Document, ParseError> {
         if sink.failed.get() {
             return Err(ParseError::TooComplex);
         }
-        check_dom_with_work(sink.document.root(), &mut visits)?;
         start = end;
     }
-    let document = parser.finish()?;
-    check_dom_with_work(document.root(), &mut visits)?;
-    Ok(document)
+    parser.finish()
 }
 
+// Used by adapters that mutate an already-parsed DOM, not tokenizer batches.
+#[cfg(any(feature = "web-html", test))]
 pub(in crate::formats) fn check_dom_with_work(
     root: NodeRef<'_>,
     visits: &mut usize,
 ) -> Result<(), ParseError> {
+    check_dom_with_limits(root, visits, Limits::default())
+}
+
+#[cfg(test)]
+thread_local! {
+    // Count actual audits and inspected nodes/attributes, not elapsed time.
+    static DOM_AUDITS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+}
+
+fn check_dom_with_limits(
+    root: NodeRef<'_>,
+    visits: &mut usize,
+    limits: Limits,
+) -> Result<(), ParseError> {
+    #[cfg(test)]
+    DOM_AUDITS.with(|stats| {
+        let (passes, work) = stats.get();
+        stats.set((passes + 1, work));
+    });
     let mut pending = vec![(root, 0)];
     let mut count = 0;
     let mut bytes = 0usize;
@@ -495,7 +518,7 @@ pub(in crate::formats) fn check_dom_with_work(
         let (attributes, payload) = node
             .query(|inner| match &inner.data {
                 NodeData::Element(element) => {
-                    if element.attrs.len() > MAX_ATTRIBUTES {
+                    if element.attrs.len() > limits.attributes {
                         return (element.attrs.len(), usize::MAX);
                     }
                     let bytes =
@@ -534,11 +557,16 @@ pub(in crate::formats) fn check_dom_with_work(
             .saturating_add(std::mem::size_of::<dom_query::TreeNode>())
             .saturating_add(payload);
         *visits = visits.saturating_add(1 + attributes);
-        if *visits > MAX_PARSE_VISITS
-            || count > MAX_NODES
-            || depth > MAX_DEPTH
-            || attributes > MAX_ATTRIBUTES
-            || bytes > MAX_DOM_BYTES
+        #[cfg(test)]
+        DOM_AUDITS.with(|stats| {
+            let (passes, work) = stats.get();
+            stats.set((passes, work + 1 + attributes));
+        });
+        if *visits > limits.operations
+            || count > limits.nodes
+            || depth > limits.depth
+            || attributes > limits.attributes
+            || bytes > limits.bytes
         {
             return Err(ParseError::TooComplex);
         }
@@ -550,6 +578,42 @@ pub(in crate::formats) fn check_dom_with_work(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_work_is_linear_not_per_tokenizer_batch() {
+        for fragment in [false, true] {
+            DOM_AUDITS.with(|stats| stats.set((0, 0)));
+            parse("", fragment).unwrap();
+            let (passes, base_work) = DOM_AUDITS.with(Cell::get);
+            assert_eq!(passes, 1);
+            for repetitions in [128, 512, 2_048, 8_192] {
+                let source = "<p a='x' b='y'>text</p>".repeat(repetitions);
+                assert!(source.len() > PARSE_BATCH_BYTES || repetitions == 128);
+                DOM_AUDITS.with(|stats| stats.set((0, 0)));
+                let document = parse(&source, fragment).unwrap();
+                let (passes, work) = DOM_AUDITS.with(Cell::get);
+                assert_eq!(passes, 1, "repetitions={repetitions}, fragment={fragment}");
+                // Each repetition adds two nodes and two attributes. Input
+                // batches grow with size, but none rescans the accumulated DOM.
+                assert_eq!(work, base_work + repetitions * 4);
+                assert_eq!(document.select("p").nodes().len(), repetitions);
+            }
+        }
+    }
+
+    #[test]
+    fn final_audit_shares_the_construction_work_budget() {
+        for remaining in [1, 2] {
+            let mut sink = BudgetSink::new(Limits::default());
+            let root = sink.get_document();
+            let comment = sink.create_comment("comment".into());
+            sink.append(&root, NodeOrText::AppendNode(comment));
+            assert!(!sink.failed.get());
+            sink.limits.operations = sink.operations.get() + remaining;
+            // The final audit must inspect the root and comment once each.
+            assert_eq!(sink.finish().is_ok(), remaining == 2);
+        }
+    }
 
     #[test]
     fn incremental_parser_bounds_arena_work_and_utf8_batches() {

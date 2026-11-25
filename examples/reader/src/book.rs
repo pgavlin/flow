@@ -168,6 +168,12 @@ impl Book {
         source_url: Option<Url>,
         content_type: Option<&str>,
     ) -> Result<Self> {
+        let _span = crate::telemetry::phase_span!(
+            "flow.reader.import",
+            generation = generation,
+            format = format!("{format:?}"),
+            bytes = bytes.len() as u64
+        );
         ensure!(
             bytes.len() <= MAX_INPUT,
             "Input exceeds the 64 MiB demo limit"
@@ -192,7 +198,13 @@ impl Book {
             bytes.len() <= MAX_DOCUMENT,
             "Standalone document exceeds the 16 MiB demo limit"
         );
-        let text = decode_text(&bytes, content_type)?;
+        let text = {
+            let _span = crate::telemetry::phase_span!(
+                "flow.reader.decode_text",
+                bytes = bytes.len() as u64
+            );
+            decode_text(&bytes, content_type)?
+        };
         let resource_base = source_url.as_ref().map(ToString::to_string);
         let identity = resource_base.clone().map(DocumentReference::Host);
         let mut title = name.to_owned();
@@ -300,6 +312,7 @@ impl Book {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_url(url: &str, generation: u64) -> Result<Self> {
+        let _span = crate::telemetry::phase_span!("flow.reader.open_url", generation = generation);
         let mut plan = url_request(url)?;
         let mut response = fetch_http(&plan.request_url, MAX_INPUT)
             .context("Could not fetch document (Wikipedia articles request Parsoid HTML)")?;
@@ -359,6 +372,10 @@ impl Book {
     }
 
     pub fn resource(&self, request: &ResourceRequest) -> Result<PreparedResource> {
+        let _span = crate::telemetry::phase_span!(
+            "flow.reader.resource",
+            kind = format!("{:?}", request.kind)
+        );
         self.check_scope(&request.publication, &request.revision)?;
         let bytes: Arc<[u8]> = match (&self.input, &request.resource) {
             (Input::Epub(input), ResourceReference::Publication(key)) => {
@@ -625,8 +642,22 @@ fn fetch_http(reference: &str, limit: usize) -> Result<HttpInput> {
         url.username().is_empty() && url.password().is_none(),
         "Credentials in URLs are not supported"
     );
+    let _span = crate::telemetry::phase_span!(
+        "flow.reader.http",
+        host = url.host_str().unwrap_or_default(),
+        limit_bytes = limit as u64
+    );
     let client = http_client()?;
-    let response = client.get(url).send()?.error_for_status()?;
+    let response = {
+        let _span = crate::telemetry::phase_span!("flow.reader.http_headers");
+        let response = client.get(url).send()?;
+        crate::telemetry::phase_event!(
+            "flow.reader.http_status",
+            milestone = "http_status",
+            status = response.status().as_u16() as u64
+        );
+        response.error_for_status()?
+    };
     let url = response.url().to_string();
     external_url(&url)?;
     let content_type = response
@@ -642,7 +673,15 @@ fn fetch_http(reference: &str, limit: usize) -> Result<HttpInput> {
         "Response exceeds the demo byte limit"
     );
     let mut bytes = Vec::new();
-    response.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    {
+        let _span = crate::telemetry::phase_span!("flow.reader.http_body");
+        response.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    }
+    crate::telemetry::phase_event!(
+        "flow.reader.http_complete",
+        milestone = "http_complete",
+        bytes = bytes.len() as u64
+    );
     ensure!(bytes.len() <= limit, "Response exceeds the demo byte limit");
     Ok(HttpInput {
         url,

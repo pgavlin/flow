@@ -67,9 +67,65 @@ pub enum Response {
     },
 }
 
+pub struct QueuedJob {
+    job: Job,
+    #[cfg(feature = "telemetry")]
+    enqueued_at: web_time::Instant,
+}
+
+impl QueuedJob {
+    fn new(job: Job) -> Self {
+        Self {
+            job,
+            #[cfg(feature = "telemetry")]
+            enqueued_at: web_time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(feature = "telemetry")]
+impl Job {
+    fn name(&self) -> &'static str {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::OpenUrl { .. } => "open_url",
+            #[cfg(target_arch = "wasm32")]
+            Self::OpenResponse { .. } => "open_response",
+            Self::OpenBytes { .. } => "open_bytes",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::OpenPath { .. } => "open_path",
+            Self::Document { .. } => "document",
+            Self::Resource { .. } => "resource",
+            Self::Link { .. } => "link",
+        }
+    }
+    fn generation(&self) -> u64 {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::OpenUrl { generation, .. } | Self::OpenPath { generation, .. } => *generation,
+            #[cfg(target_arch = "wasm32")]
+            Self::OpenResponse { generation, .. } => *generation,
+            Self::OpenBytes { generation, .. }
+            | Self::Document { generation, .. }
+            | Self::Resource { generation, .. }
+            | Self::Link { generation, .. } => *generation,
+        }
+    }
+}
+
+fn process_queued(book: &mut Option<(u64, Book)>, queued: QueuedJob) -> Response {
+    let _span = crate::telemetry::phase_span!(
+        "flow.reader.job",
+        operation = queued.job.name(),
+        generation = queued.job.generation(),
+        queue_ms = queued.enqueued_at.elapsed().as_secs_f64() * 1000.0
+    );
+    process(book, queued.job)
+}
+
 pub struct Backend {
     #[cfg(not(target_arch = "wasm32"))]
-    sender: std::sync::mpsc::SyncSender<Job>,
+    sender: std::sync::mpsc::SyncSender<QueuedJob>,
     #[cfg(target_arch = "wasm32")]
     proxy: EventLoopProxy<Event>,
     #[cfg(target_arch = "wasm32")]
@@ -87,7 +143,7 @@ impl Backend {
                     let mut book = None;
                     while let Ok(job) = receiver.recv() {
                         if proxy
-                            .send_event(Event::Response(process(&mut book, job)))
+                            .send_event(Event::Response(process_queued(&mut book, job)))
                             .is_err()
                         {
                             break;
@@ -103,6 +159,7 @@ impl Backend {
     }
 
     pub fn submit(&self, job: Job) -> anyhow::Result<()> {
+        let job = QueuedJob::new(job);
         #[cfg(not(target_arch = "wasm32"))]
         self.sender
             .try_send(job)
@@ -115,8 +172,8 @@ impl Backend {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn run(&mut self, job: Job) -> Response {
-        process(&mut self.book, job)
+    pub fn run(&mut self, job: QueuedJob) -> Response {
+        process_queued(&mut self.book, job)
     }
 }
 

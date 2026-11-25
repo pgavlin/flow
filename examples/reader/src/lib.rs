@@ -7,6 +7,7 @@
 mod backend;
 mod book;
 mod paging;
+mod telemetry;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
@@ -57,7 +58,7 @@ enum Event {
         bytes: Vec<u8>,
     },
     #[cfg(target_arch = "wasm32")]
-    Run(Job),
+    Run(backend::QueuedJob),
 }
 
 struct Display {
@@ -83,9 +84,15 @@ struct App {
     poll_again: bool,
     paging: paging::Paging,
     last_error: Option<String>,
+    #[cfg(feature = "telemetry")]
+    window_ready_at: Option<Instant>,
+    #[cfg(feature = "telemetry")]
+    pending_first_paint: Option<(u64, Instant)>,
 }
 
 pub fn run() -> Result<()> {
+    telemetry::init()?;
+    let _span = telemetry::phase_span!("flow.reader.startup");
     let event_loop = EventLoop::<Event>::with_user_event().build()?;
     #[cfg(target_arch = "wasm32")]
     web::set_proxy(event_loop.create_proxy());
@@ -111,7 +118,13 @@ pub fn run() -> Result<()> {
         poll_again: false,
         paging: paging::Paging::default(),
         last_error: None,
+        #[cfg(feature = "telemetry")]
+        window_ready_at: None,
+        #[cfg(feature = "telemetry")]
+        pending_first_paint: None,
     };
+    #[cfg(feature = "telemetry")]
+    drop(_span);
     #[cfg(not(target_arch = "wasm32"))]
     {
         let mut app = app;
@@ -177,6 +190,15 @@ impl App {
         }
         self.requested_generation = self.requested_generation.checked_add(1)?;
         self.opening = true;
+        #[cfg(feature = "telemetry")]
+        {
+            self.pending_first_paint = Some((self.requested_generation, Instant::now()));
+        }
+        telemetry::phase_event!(
+            "flow.reader.open_submitted",
+            milestone = "open_submitted",
+            generation = self.requested_generation
+        );
         self.last_error = None;
         self.set_status("Opening…");
         Some(self.requested_generation)
@@ -338,6 +360,10 @@ impl App {
                 }
                 match result {
                     Ok(Some((title, model))) => {
+                        let _span = telemetry::phase_span!(
+                            "flow.reader.install_publication",
+                            generation = generation
+                        );
                         let start = model
                             .start()
                             .ok_or_else(|| anyhow!("Publication has no start"))?;
@@ -382,6 +408,10 @@ impl App {
                 result,
             } if generation == self.generation => match result {
                 Ok(document) => {
+                    let _span = telemetry::phase_span!(
+                        "flow.reader.install_document",
+                        generation = generation
+                    );
                     if let Some(session) = &mut self.session {
                         let result = session.provide_document(id, document);
                         self.supplied(id, result);
@@ -431,6 +461,7 @@ impl App {
         let Some(display) = &mut self.display else {
             return Ok(());
         };
+        let _span = telemetry::phase_span!("flow.reader.paint", generation = self.generation);
         let (logical_width, logical_height) = viewport(&display.window);
         let scale = render_scale(&display.window);
         let (raster_width, raster_height) =
@@ -464,6 +495,12 @@ impl App {
         {
             session.resize((logical_width, logical_height));
             self.paging.before_paint(session);
+            let _span = telemetry::phase_span!(
+                "flow.reader.render",
+                generation = self.generation,
+                width = logical_width as u64,
+                height = logical_height as u64
+            );
             session.render_into(
                 &mut display.pixels.surface_mut(),
                 logical_width,
@@ -471,12 +508,36 @@ impl App {
                 scale,
             )?;
         }
+        let _present = telemetry::phase_span!("flow.reader.present");
         let mut buffer = display
             .surface
             .buffer_mut()
             .map_err(|error| anyhow!("{error}"))?;
         pack_pixels(&display.pixels, &mut buffer, size.width as usize);
         buffer.present().map_err(|error| anyhow!("{error}"))?;
+        #[cfg(feature = "telemetry")]
+        drop(_present);
+        #[cfg(feature = "telemetry")]
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.viewer().has_document())
+            && self
+                .pending_first_paint
+                .as_ref()
+                .is_some_and(|(generation, _)| *generation == self.generation)
+        {
+            let (generation, opened_at) = self.pending_first_paint.take().unwrap();
+            telemetry::phase_event!(
+                "flow.reader.first_content",
+                milestone = "first_content",
+                generation = generation,
+                open_ms = opened_at.elapsed().as_secs_f64() * 1000.0,
+                window_ms = self
+                    .window_ready_at
+                    .map(|time| time.elapsed().as_secs_f64() * 1000.0)
+            );
+        }
         self.reading_status();
         self.pump()
     }
@@ -572,6 +633,7 @@ impl ApplicationHandler<Event> for App {
         if self.display.is_some() {
             return;
         }
+        let _span = telemetry::phase_span!("flow.reader.create_window");
         let result = (|| -> Result<Display> {
             let attributes = Window::default_attributes()
                 .with_title("flow demo")
@@ -593,6 +655,11 @@ impl ApplicationHandler<Event> for App {
         match result {
             Ok(display) => {
                 self.display = Some(display);
+                #[cfg(feature = "telemetry")]
+                {
+                    self.window_ready_at = Some(Instant::now());
+                }
+                telemetry::phase_event!("flow.reader.window_ready", milestone = "window_ready");
                 self.set_status(self.status.clone());
                 self.redraw();
             }
@@ -909,6 +976,7 @@ fn pack_pixels(source: &PixelBuffer, destination: &mut [u32], width: usize) {
     }
 }
 fn demo_fonts() -> Vec<FontResource> {
+    let _span = telemetry::phase_span!("flow.reader.font_resources");
     // Reuse licensed repository fixtures rather than discovering system fonts.
     [
         include_bytes!("../../../crates/flow_document/tests/fixtures/fonts/literata.ttf")

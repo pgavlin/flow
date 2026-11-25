@@ -108,6 +108,10 @@ pub struct SearchIndex {
 
 impl SearchIndex {
     pub fn new(document: &FlowDocument) -> Self {
+        let _span = crate::telemetry::phase_span!(
+            "flow.search.index",
+            canonical_bytes = document.text().len().as_usize() as u64
+        );
         let mut units = Vec::new();
         let mut stack = vec![document.root()];
         while let Some(id) = stack.pop() {

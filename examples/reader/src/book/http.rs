@@ -10,6 +10,7 @@ pub(super) fn http_client() -> Result<&'static reqwest::blocking::Client> {
     if let Some(client) = CLIENT.get() {
         return Ok(client);
     }
+    let _span = crate::telemetry::phase_span!("flow.reader.http_client");
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(5))

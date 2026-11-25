@@ -142,6 +142,39 @@ HTML5 parser (2 MiB input limit); these construction budgets are not a
 process-wide allocation quota. Exact HTML byte offsets, browser CSS fidelity,
 and responsive selection/rendering are not implemented.
 
+## Startup tracing
+
+Enable the reader's opt-in desktop subscriber and the engine's phase spans:
+
+```sh
+cargo run --manifest-path examples/reader/Cargo.toml --features telemetry -- \
+  https://en.wikipedia.org/wiki/Apple 2> /tmp/flow-reader.trace
+```
+
+The default filter is `flow::phase=info`; `RUST_LOG` overrides it. Output includes
+thread names, process-relative timestamps, per-job queue wait and generation,
+HTTP headers/body, decoding/import stages, navigation/search indexing,
+composition/placement, rendering, and presentation. The host alone installs the
+subscriber; default builds have no subscriber and compile out phase fields.
+
+The `first_content` milestone reports `open_ms` since open submission and
+`window_ms` since window/surface setup. It is emitted once after the requested
+document's first successful buffer presentation, not after all images finish.
+Span `time.busy` is entered-span wall time (including synchronous I/O), not a CPU
+sample count; parent timings include child spans and must not be added together.
+Default phase output records sizes, formats, and HTTP hostnames, not source HTML
+or full URLs/query strings.
+
+Before eliminating per-chunk DOM budget rescans, a debug-build Apple baseline
+on macOS measured about 3.00 s window-to-content:
+HTTP ~350 ms; import ~496 ms (HTML5 parsing ~339 ms); composition ~583 ms;
+navigation indexing ~1.36 s across three builds (two empty-layout builds and one
+with 365 blocks / 4,171 anchors). These are observational timings, not test
+thresholds. With one final DOM audit instead of per-chunk rescans, a subsequent
+run measured parsing ~110 ms (final audit ~2.6 ms), total import ~270 ms, and
+window-to-content ~2.77 s. Navigation reconstruction remains unchanged. Tracing
+itself does not change scheduling or optimize those phases.
+
 ## Checks
 
 ```sh

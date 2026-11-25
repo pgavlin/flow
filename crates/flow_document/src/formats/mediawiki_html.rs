@@ -164,21 +164,29 @@ pub fn import(
     source: &str,
     options: MediaWikiOptions,
 ) -> Result<MediaWikiImportOutcome, MediaWikiImportError> {
+    let _span = crate::telemetry::phase_span!("flow.import.mediawiki", bytes = source.len() as u64);
     if options.input == MediaWikiInput::BodyFragment && options.expected_version.is_none() {
         return Err(MediaWikiImportError::FragmentVersionRequired);
     }
-    let document = match options.input {
-        MediaWikiInput::Document => parser::parse_bounded(source),
-        MediaWikiInput::BodyFragment => parser::parse_body_fragment(source),
-    }
-    .map_err(|_| MediaWikiImportError::TooComplex)?;
+    let document = {
+        let _span = crate::telemetry::phase_span!("flow.import.mediawiki.parse");
+        match options.input {
+            MediaWikiInput::Document => parser::parse_bounded(source),
+            MediaWikiInput::BodyFragment => parser::parse_body_fragment(source),
+        }
+        .map_err(|_| MediaWikiImportError::TooComplex)?
+    };
     let source_url = options
         .source_url
         .as_deref()
         .map(absolute_url)
         .transpose()?;
-    let base = metadata::effective_base(&document, &options, source_url.as_ref())?;
-    let metadata = metadata::extract(&document, &options, base.as_ref())?;
+    let (base, metadata) = {
+        let _span = crate::telemetry::phase_span!("flow.import.mediawiki.metadata");
+        let base = metadata::effective_base(&document, &options, source_url.as_ref())?;
+        let metadata = metadata::extract(&document, &options, base.as_ref())?;
+        (base, metadata)
+    };
     let root = match options.input {
         MediaWikiInput::Document => document.select("body").nodes().first().copied(),
         MediaWikiInput::BodyFragment => document
@@ -205,28 +213,37 @@ pub fn import(
         source_url: source_url.as_ref(),
     };
     let content_root = adapter.tree.root();
-    adapter.adapt(root, content_root)?;
-    adapter.tree = structure::normalize(adapter.tree, &adapter.policy)?;
+    {
+        let _span = crate::telemetry::phase_span!("flow.import.mediawiki.adapt");
+        adapter.adapt(root, content_root)?;
+    }
+    {
+        let _span = crate::telemetry::phase_span!("flow.import.mediawiki.structure");
+        adapter.tree = structure::normalize(adapter.tree, &adapter.policy)?;
+    }
     let styles = vec![AuthorStyle::default(); adapter.tree.nodes().len()];
-    let mut content = lowering::lower_tree(
-        source,
-        adapter.tree,
-        &styles,
-        LoweringOptions {
-            resource_base: base.as_ref().map(ToString::to_string),
-            identity: options.identity,
-            retention: options.retention,
-            syntax: SourceSyntax::Html,
-        },
-        content_root,
-        &adapter.policy,
-    )
-    .map_err(|error| match error {
-        lowering::LoweringError::Build(error) => MediaWikiImportError::Build(error),
-        lowering::LoweringError::RetainedSource(error) => {
-            MediaWikiImportError::RetainedSource(error)
-        }
-    })?;
+    let mut content = {
+        let _span = crate::telemetry::phase_span!("flow.import.mediawiki.lower");
+        lowering::lower_tree(
+            source,
+            adapter.tree,
+            &styles,
+            LoweringOptions {
+                resource_base: base.as_ref().map(ToString::to_string),
+                identity: options.identity,
+                retention: options.retention,
+                syntax: SourceSyntax::Html,
+            },
+            content_root,
+            &adapter.policy,
+        )
+        .map_err(|error| match error {
+            lowering::LoweringError::Build(error) => MediaWikiImportError::Build(error),
+            lowering::LoweringError::RetainedSource(error) => {
+                MediaWikiImportError::RetainedSource(error)
+            }
+        })?
+    };
     content.diagnostics.extend(adapter.diagnostics);
     for id in content.document.preorder(content.document.root()) {
         let node = content.document.get_node(id).unwrap();

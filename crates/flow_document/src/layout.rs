@@ -282,6 +282,10 @@ impl ComposedDocument {
 
     /// Produces a continuous layout while retaining the intrinsic composition.
     pub fn continuous_layout(&self) -> ContinuousLayout {
+        let _span = crate::telemetry::phase_span!(
+            "flow.layout.continuous-place",
+            blocks = self.blocks.len() as u64
+        );
         self.clone().into_continuous_layout()
     }
 }
