@@ -426,6 +426,24 @@ impl Lowerer<'_> {
     }
 
     fn lower_definition_list(&mut self, source: SourceNodeId) -> Result<NodeId, LoweringError> {
+        let children = self.tree.get(source).unwrap().children();
+        let entries: Vec<_> = children
+            .iter()
+            .copied()
+            .filter(|child| !self.source_is_ignorable_whitespace(*child))
+            .map(|child| self.element_name(child))
+            .collect();
+        // HTML permits incomplete definition groups, but Flow requires complete
+        // term/definition pairs. Retain nonconforming lists as ordinary flow
+        // rather than dropping their content or inventing missing entries.
+        let valid = entries.first() == Some(&Some("dt"))
+            && entries.last() == Some(&Some("dd"))
+            && entries.iter().all(|name| matches!(name, Some("dt" | "dd")));
+        if !valid && matches!(self.syntax, SourceSyntax::Html) {
+            let flow = self.node(NodeKind::Flow, source, None)?;
+            self.append_flow_children(flow, source)?;
+            return Ok(flow);
+        }
         let list = self.node(NodeKind::DefinitionList, source, None)?;
         for child in self.tree.get(source).unwrap().children().to_vec() {
             let kind = match self.element_name(child) {
@@ -1692,6 +1710,8 @@ impl Lowerer<'_> {
                     | "ul"
                     | "ol"
                     | "dl"
+                    | "dt"
+                    | "dd"
                     | "table"
                     | "details"
                     | "iframe"

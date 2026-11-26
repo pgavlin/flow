@@ -29,6 +29,54 @@ fn nodes(document: &FlowDocument) -> impl Iterator<Item = &Node> {
 }
 
 #[test]
+fn incomplete_definition_lists_preserve_readable_content() {
+    for body in [
+        "<dl><dt>Studio albums</dt></dl>",
+        "<dl><dd>Studio albums</dd></dl>",
+        "<dl><dt>Albums</dt><dd>Recordings</dd><dt>Studio albums</dt></dl>",
+        "<dl><dt><a href='./Albums'>Studio albums</a></dt><dd><p>Recordings</p><dl><dt>Nested term</dt></dl></dd><dt>Last term</dt></dl>",
+    ] {
+        let result = fragment(body);
+        let document = &result.content.document;
+        assert!(document.text().as_str().contains("Studio albums"), "{body}");
+        assert!(!nodes(document).any(|node| matches!(node.kind, NodeKind::DefinitionList)));
+        if body.contains("Nested term") {
+            for text in ["Recordings", "Nested term", "Last term"] {
+                assert!(document.text().as_str().contains(text));
+            }
+            assert!(nodes(document).any(|node| matches!(node.kind, NodeKind::Link(_))));
+        }
+    }
+    assert!(fragment("<dl></dl>").content.document.text().is_empty());
+}
+
+#[test]
+fn complete_definition_lists_keep_their_semantics() {
+    let result = fragment(
+        "<dl> <!-- group --> <dt>Albums</dt><dt>Records</dt><dd>First</dd><dd>Second</dd><dt>Singles</dt><dd>Third</dd></dl>",
+    );
+    let document = &result.content.document;
+    assert_eq!(
+        nodes(document)
+            .filter(|node| matches!(node.kind, NodeKind::DefinitionList))
+            .count(),
+        1
+    );
+    assert_eq!(
+        nodes(document)
+            .filter(|node| matches!(node.kind, NodeKind::Term))
+            .count(),
+        3
+    );
+    assert_eq!(
+        nodes(document)
+            .filter(|node| matches!(node.kind, NodeKind::Definition))
+            .count(),
+        3
+    );
+}
+
+#[test]
 fn versions_are_explicit_and_must_agree() {
     assert!(matches!(
         import("<p>body</p>", Default::default()),
