@@ -319,6 +319,7 @@ mod tests {
         parse(
             source,
             MarkdownOptions {
+                limits: Default::default(),
                 resource_base: None,
                 identity: None,
                 retention: SourceRetention::Discard,

@@ -49,6 +49,7 @@ fn lower(source: &str, tree: SourceTree, retention: SourceRetention) -> ImportOu
         tree,
         &styles,
         LoweringOptions {
+            max_table_columns: None,
             identity: Some(DocumentReference::Host("original-html".into())),
             resource_base: Some("https://example.test/article".into()),
             retention,
@@ -399,6 +400,7 @@ fn adapter_hooks_return_flow_concepts_without_shared_source_conventions() {
         tree,
         &styles,
         LoweringOptions {
+            max_table_columns: None,
             identity: None,
             resource_base: None,
             retention: SourceRetention::Discard,
@@ -430,6 +432,7 @@ fn html_ranges_are_validated_against_original_utf8_bytes() {
         tree,
         &styles,
         LoweringOptions {
+            max_table_columns: None,
             identity: None,
             resource_base: None,
             retention: SourceRetention::Discard,

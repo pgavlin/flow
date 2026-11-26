@@ -9,7 +9,7 @@ use super::html::{lowering, source::SourceSyntax};
 
 use super::xhtml::{
     XhtmlDiagnostic, XhtmlElement, XhtmlPrepareError, XhtmlProfileError, XhtmlSourceTree,
-    XhtmlTreeProfile, prepare,
+    XhtmlTreeProfile,
 };
 use crate::model::flow::{
     AuthorStyle, BuildError, DocumentReference, ImportOutcome, MathDisplay, PreformattedKind,
@@ -30,6 +30,9 @@ pub const CURRENT_FLOW_SEMANTIC_XHTML_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Default)]
 pub struct XhtmlOptions {
+    pub limits: super::xhtml::XhtmlLimits,
+    /// Maximum table width and normalized column span: None uses 4,096; zero is treated as one.
+    pub max_table_columns: Option<u32>,
     pub resource_base: Option<String>,
     pub identity: Option<DocumentReference>,
     pub retention: SourceRetention,
@@ -124,7 +127,14 @@ pub fn import(source: &str, options: XhtmlOptions) -> Result<ImportOutcome, Xhtm
             options.canonical_version,
         ));
     }
-    let prepared = prepare(source.as_bytes(), &StrictFlowProfile)?;
+    let prepared = super::xhtml::prepare_with_options(
+        source.as_bytes(),
+        super::xhtml::XhtmlParseOptions {
+            limits: options.limits,
+            ..Default::default()
+        },
+        &StrictFlowProfile,
+    )?;
     let content_root = prepared.tree.root();
     let author_styles = vec![AuthorStyle::default(); prepared.tree.nodes().len()];
     lowering::lower_tree(
@@ -132,6 +142,7 @@ pub fn import(source: &str, options: XhtmlOptions) -> Result<ImportOutcome, Xhtm
         prepared.tree,
         &author_styles,
         lowering::LoweringOptions {
+            max_table_columns: options.max_table_columns,
             resource_base: options.resource_base,
             identity: options.identity,
             retention: options.retention,

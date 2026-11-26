@@ -57,6 +57,8 @@ fn exact_import_outcomes() {
                 let result = flow_xhtml::import(
                     &source,
                     flow_xhtml::XhtmlOptions {
+                        limits: Default::default(),
+                        max_table_columns: None,
                         canonical_version: version,
                         resource_base: Some("https://example.test/book/chapter.xhtml".into()),
                         identity: Some(DocumentReference::Host("baseline".into())),
@@ -78,6 +80,8 @@ fn exact_import_outcomes() {
             let result = epub_xhtml::import(
                 &epub,
                 epub_xhtml::EpubXhtmlOptions {
+                    limits: Default::default(),
+                    max_table_columns: None,
                     identity: Some(DocumentReference::PublicationItem("baseline".into())),
                     resource_base: Some("epub://baseline/chapter.xhtml".into()),
                     retention: SourceRetention::Retain,
@@ -121,6 +125,8 @@ fn exact_import_outcomes() {
         &flow_xhtml::import(
             "<p/>",
             flow_xhtml::XhtmlOptions {
+                limits: Default::default(),
+                max_table_columns: None,
                 canonical_version: 2,
                 ..Default::default()
             },

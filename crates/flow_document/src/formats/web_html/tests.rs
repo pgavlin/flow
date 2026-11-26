@@ -883,7 +883,7 @@ fn ruby_inside_preformatted_content_keeps_literal_spacing() {
 #[test]
 fn only_empty_anchor_targets_are_renamed_before_extraction() {
     let document = Document::from("<p><a id='target'></a><a id='choice'>Choice text</a></p>");
-    repair_before_extraction(&document, None, None).unwrap();
+    repair_before_extraction(&document, None, None, HtmlLimits::default()).unwrap();
     assert!(document.select("#target").nodes()[0].has_name("span"));
     assert!(document.select("#choice").nodes()[0].has_name("a"));
 }

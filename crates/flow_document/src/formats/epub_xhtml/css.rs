@@ -1093,6 +1093,7 @@ mod tests {
             source,
             XhtmlParseOptions {
                 allow_doctype: true,
+                ..Default::default()
             },
             &EpubXhtmlProfile,
         )
@@ -1146,6 +1147,7 @@ mod tests {
             source,
             XhtmlParseOptions {
                 allow_doctype: true,
+                ..Default::default()
             },
             &EpubXhtmlProfile,
         )
@@ -1192,6 +1194,7 @@ mod tests {
             source,
             XhtmlParseOptions {
                 allow_doctype: true,
+                ..Default::default()
             },
             &EpubXhtmlProfile,
         )
@@ -1221,6 +1224,7 @@ mod tests {
             source,
             XhtmlParseOptions {
                 allow_doctype: true,
+                ..Default::default()
             },
             &EpubXhtmlProfile,
         )

@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::*;
+use crate::formats::xhtml::prepare;
 use crate::formats::xhtml::{XhtmlSourceNodeKind, parse};
 
 #[test]

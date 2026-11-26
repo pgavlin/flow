@@ -23,6 +23,9 @@ mod tests;
 /// document order after publication-relative resource resolution by the host.
 #[derive(Clone, Debug, Default)]
 pub struct EpubXhtmlOptions {
+    pub limits: super::xhtml::XhtmlLimits,
+    /// Maximum table width and normalized column span: None uses 4,096; zero is treated as one.
+    pub max_table_columns: Option<u32>,
     pub resource_base: Option<String>,
     pub identity: Option<DocumentReference>,
     pub retention: SourceRetention,
@@ -149,6 +152,7 @@ pub fn import(source: &str, options: EpubXhtmlOptions) -> Result<ImportOutcome, 
             source.as_bytes(),
             XhtmlParseOptions {
                 allow_doctype: true,
+                limits: options.limits,
             },
             &EpubXhtmlProfile,
         )?
@@ -168,6 +172,7 @@ pub fn import(source: &str, options: EpubXhtmlOptions) -> Result<ImportOutcome, 
             prepared.tree,
             &author_styles,
             lowering::LoweringOptions {
+                max_table_columns: options.max_table_columns,
                 resource_base: options.resource_base,
                 identity: options.identity,
                 retention: options.retention,
@@ -192,6 +197,7 @@ pub fn stylesheet_hrefs(source: &str) -> Result<Vec<String>, XhtmlPrepareError> 
         source.as_bytes(),
         XhtmlParseOptions {
             allow_doctype: true,
+            ..Default::default()
         },
         &EpubXhtmlProfile,
     )?;

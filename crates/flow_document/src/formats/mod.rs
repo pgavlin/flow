@@ -41,6 +41,10 @@ impl SourceFormat {
 
 #[derive(Clone, Debug, Default)]
 pub struct SourceOptions {
+    pub markdown_limits: markdown::MarkdownLimits,
+    pub xhtml_limits: xhtml::XhtmlLimits,
+    /// Maximum table width and normalized column span: None uses 4,096; zero is treated as one.
+    pub max_table_columns: Option<u32>,
     pub resource_base: Option<String>,
     pub identity: Option<DocumentReference>,
     pub retention: SourceRetention,
@@ -68,6 +72,7 @@ pub fn import_source(
         SourceFormat::Markdown => markdown::parse(
             source,
             markdown::MarkdownOptions {
+                limits: options.markdown_limits,
                 resource_base: options.resource_base,
                 identity: options.identity,
                 retention: options.retention,
@@ -77,6 +82,8 @@ pub fn import_source(
         SourceFormat::Xhtml => flow_xhtml::import(
             source,
             flow_xhtml::XhtmlOptions {
+                limits: options.xhtml_limits,
+                max_table_columns: options.max_table_columns,
                 resource_base: options.resource_base,
                 identity: options.identity,
                 retention: options.retention,

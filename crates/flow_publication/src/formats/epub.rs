@@ -389,6 +389,7 @@ impl EpubPublication {
                 identity: Some(DocumentReference::PublicationItem(item.href.clone())),
                 retention,
                 stylesheets,
+                ..Default::default()
             },
         )
         .map_err(EpubError::from);

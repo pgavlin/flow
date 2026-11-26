@@ -62,6 +62,7 @@ fn block_tag(tag: &str) -> bool {
 pub(super) fn normalize(
     tree: SourceTree,
     policy: &policy::Policy,
+    limits: HtmlLimits,
 ) -> Result<SourceTree, MediaWikiImportError> {
     let mut arena: Vec<Plan> = Vec::new();
     let mut results: HashMap<SourceNodeId, usize> = HashMap::new();
@@ -109,15 +110,8 @@ pub(super) fn normalize(
         });
         results.insert(id, index);
     }
-    let mut output = SourceTree::new(
-        None,
-        TreeLimits {
-            max_nodes: MAX_NODES,
-            max_depth: MAX_DEPTH + 2,
-            ..Default::default()
-        },
-    )
-    .map_err(|_| MediaWikiImportError::TooComplex)?;
+    let mut output = SourceTree::new(None, limits.tree_limits(2))
+        .map_err(|_| MediaWikiImportError::TooComplex)?;
     let root = output.root();
     let mut remap = HashMap::from([(tree.root(), root)]);
     let mut pending: Vec<_> = arena[results[&tree.root()]]

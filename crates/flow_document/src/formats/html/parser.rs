@@ -36,8 +36,63 @@ pub(in crate::formats) enum ParseError {
     TooComplex,
 }
 
+/// Host-selected HTML construction budgets. These are accounting limits, not
+/// process-wide memory or execution quotas. Zero is a literal limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HtmlLimits {
+    /// Maximum UTF-8 input bytes.
+    pub max_source_bytes: usize,
+    pub max_nodes: usize,
+    pub max_depth: usize,
+    /// Maximum attributes per element.
+    pub max_attributes: usize,
+    /// Accounted DOM storage, including node and attribute storage.
+    pub max_dom_bytes: usize,
+    /// Construction operations and final validation visits.
+    pub max_operations: usize,
+    /// Payload bytes in each adapted/normalized source tree.
+    pub max_tree_bytes: usize,
+}
+
+impl Default for HtmlLimits {
+    fn default() -> Self {
+        Self {
+            max_source_bytes: MAX_SOURCE,
+            max_nodes: MAX_NODES,
+            max_depth: MAX_DEPTH,
+            max_attributes: MAX_ATTRIBUTES,
+            max_dom_bytes: MAX_DOM_BYTES,
+            max_operations: MAX_PARSE_VISITS,
+            max_tree_bytes: 32 * 1024 * 1024,
+        }
+    }
+}
+
+impl HtmlLimits {
+    pub(in crate::formats) fn tree_limits(self, extra_depth: usize) -> super::tree::TreeLimits {
+        super::tree::TreeLimits {
+            max_nodes: self.max_nodes,
+            max_depth: self.max_depth.saturating_add(extra_depth),
+            max_attributes: self.max_attributes,
+            max_text_bytes: self.max_tree_bytes,
+        }
+    }
+}
+
+impl From<HtmlLimits> for Limits {
+    fn from(value: HtmlLimits) -> Self {
+        Self {
+            nodes: value.max_nodes,
+            depth: value.max_depth,
+            attributes: value.max_attributes,
+            bytes: value.max_dom_bytes,
+            operations: value.max_operations,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
-struct Limits {
+pub(in crate::formats) struct Limits {
     nodes: usize,
     depth: usize,
     attributes: usize,
@@ -434,21 +489,31 @@ impl TreeSink for BudgetSink {
     }
 }
 
+#[cfg(test)]
 pub(in crate::formats) fn parse_bounded(source: &str) -> Result<Document, ParseError> {
     parse(source, false)
 }
 
 /// Parse explicitly in an HTML body context, not a guessed document context.
-#[cfg_attr(not(feature = "mediawiki-html"), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::formats) fn parse_body_fragment(source: &str) -> Result<Document, ParseError> {
     parse(source, true)
 }
 
+#[cfg(test)]
 fn parse(source: &str, fragment: bool) -> Result<Document, ParseError> {
-    if source.len() > MAX_SOURCE {
+    parse_with_limits(source, fragment, HtmlLimits::default())
+}
+
+pub(in crate::formats) fn parse_with_limits(
+    source: &str,
+    fragment: bool,
+    limits: HtmlLimits,
+) -> Result<Document, ParseError> {
+    if source.len() > limits.max_source_bytes {
         return Err(ParseError::TooComplex);
     }
-    let sink = BudgetSink::new(Limits::default());
+    let sink = BudgetSink::new(limits.into());
     let options = html5ever::ParseOpts {
         tree_builder: html5ever::tree_builder::TreeBuilderOpts {
             scripting_enabled: false,
@@ -484,7 +549,7 @@ fn parse(source: &str, fragment: bool) -> Result<Document, ParseError> {
 }
 
 // Used by adapters that mutate an already-parsed DOM, not tokenizer batches.
-#[cfg(any(feature = "web-html", test))]
+#[cfg(test)]
 pub(in crate::formats) fn check_dom_with_work(
     root: NodeRef<'_>,
     visits: &mut usize,
@@ -498,7 +563,7 @@ thread_local! {
     static DOM_AUDITS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
 
-fn check_dom_with_limits(
+pub(in crate::formats) fn check_dom_with_limits(
     root: NodeRef<'_>,
     visits: &mut usize,
     limits: Limits,

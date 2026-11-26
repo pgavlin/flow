@@ -25,6 +25,7 @@ const MAX_TABLE_PLACEMENT_STEPS: usize = 8_000_000;
 /// the complete ownership graph and remaps those slots into deterministic
 /// semantic preorder.
 pub struct FlowBuilder {
+    max_table_columns: u32,
     nodes: Vec<DraftNode>,
     resources: Vec<Resource>,
     resource_base: Option<String>,
@@ -213,6 +214,7 @@ impl FlowBuilder {
     /// Creates an empty draft builder.
     pub fn new() -> Self {
         Self {
+            max_table_columns: MAX_TABLE_COLUMNS,
             nodes: Vec::new(),
             resources: Vec::new(),
             resource_base: None,
@@ -225,6 +227,11 @@ impl FlowBuilder {
             component_parents: Vec::new(),
             component_ranks: Vec::new(),
         }
+    }
+
+    /// Sets the maximum finalized table width. Zero disallows nonempty tables.
+    pub fn set_max_table_columns(&mut self, maximum: u32) {
+        self.max_table_columns = maximum;
     }
 
     /// Registers a document-local resource and returns its draft identity.
@@ -844,7 +851,7 @@ impl FlowBuilder {
                     .ok_or(BuildError::ResourceLimit {
                         resource: StructuralResource::TableColumns,
                     })?;
-            if declared_columns > MAX_TABLE_COLUMNS {
+            if declared_columns > self.max_table_columns {
                 return Err(BuildError::ResourceLimit {
                     resource: StructuralResource::TableColumns,
                 });
@@ -896,7 +903,7 @@ impl FlowBuilder {
         // third source of declared width: only column declarations and placed
         // cell edges determine the finalized count.
         let mut max_column = declared_columns;
-        if max_column > MAX_TABLE_COLUMNS {
+        if max_column > self.max_table_columns {
             return Err(BuildError::ResourceLimit {
                 resource: StructuralResource::TableColumns,
             });
@@ -921,7 +928,7 @@ impl FlowBuilder {
                     if row_span > rows.len() - row_index {
                         return Err(BuildError::InvalidTableSpan { cell });
                     }
-                    if column_span > MAX_TABLE_COLUMNS {
+                    if column_span > self.max_table_columns {
                         return Err(BuildError::ResourceLimit {
                             resource: StructuralResource::TableColumns,
                         });
@@ -937,7 +944,7 @@ impl FlowBuilder {
                                 .ok_or(BuildError::ResourceLimit {
                                     resource: StructuralResource::TableColumns,
                                 })?;
-                        if end > MAX_TABLE_COLUMNS {
+                        if end > self.max_table_columns {
                             return Err(BuildError::ResourceLimit {
                                 resource: StructuralResource::TableColumns,
                             });

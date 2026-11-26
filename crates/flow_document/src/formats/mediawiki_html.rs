@@ -34,11 +34,10 @@ use url::Url;
 
 use super::html::{
     lowering::{self, LoweringOptions},
-    parser::{self, HTML_NS, MAX_DEPTH, MAX_NODES},
+    parser::{self, HTML_NS},
     source::SourceSyntax,
     tree::{
         Attribute, Element, ExpandedName, NodeProvenance, SourceNodeId, SourceNodeKind, SourceTree,
-        TreeLimits,
     },
 };
 use crate::model::flow::*;
@@ -98,8 +97,14 @@ pub enum MediaWikiInput {
     BodyFragment,
 }
 
+pub use super::html::parser::HtmlLimits;
+
 #[derive(Clone, Debug, Default)]
 pub struct MediaWikiOptions {
+    /// Maximum table width and normalized column span: None uses 4,096; zero is treated as one.
+    pub max_table_columns: Option<u32>,
+    /// Host-selected construction budgets; defaults preserve the historical limits.
+    pub limits: HtmlLimits,
     pub source_url: Option<String>,
     pub resource_base: Option<String>,
     pub identity: Option<DocumentReference>,
@@ -170,10 +175,11 @@ pub fn import(
     }
     let document = {
         let _span = crate::telemetry::phase_span!("flow.import.mediawiki.parse");
-        match options.input {
-            MediaWikiInput::Document => parser::parse_bounded(source),
-            MediaWikiInput::BodyFragment => parser::parse_body_fragment(source),
-        }
+        parser::parse_with_limits(
+            source,
+            options.input == MediaWikiInput::BodyFragment,
+            options.limits,
+        )
         .map_err(|_| MediaWikiImportError::TooComplex)?
     };
     let source_url = options
@@ -197,15 +203,8 @@ pub fn import(
     }
     .unwrap_or_else(|| document.root());
     let mut adapter = Adapter {
-        tree: SourceTree::new(
-            None,
-            TreeLimits {
-                max_nodes: MAX_NODES,
-                max_depth: MAX_DEPTH + 2,
-                ..Default::default()
-            },
-        )
-        .map_err(|_| MediaWikiImportError::TooComplex)?,
+        tree: SourceTree::new(None, options.limits.tree_limits(2))
+            .map_err(|_| MediaWikiImportError::TooComplex)?,
         policy: policy::Policy::default(),
         diagnostics: Vec::new(),
         numbering: 0,
@@ -219,7 +218,7 @@ pub fn import(
     }
     {
         let _span = crate::telemetry::phase_span!("flow.import.mediawiki.structure");
-        adapter.tree = structure::normalize(adapter.tree, &adapter.policy)?;
+        adapter.tree = structure::normalize(adapter.tree, &adapter.policy, options.limits)?;
     }
     let styles = vec![AuthorStyle::default(); adapter.tree.nodes().len()];
     let mut content = {
@@ -229,6 +228,7 @@ pub fn import(
             adapter.tree,
             &styles,
             LoweringOptions {
+                max_table_columns: options.max_table_columns,
                 resource_base: base.as_ref().map(ToString::to_string),
                 identity: options.identity,
                 retention: options.retention,

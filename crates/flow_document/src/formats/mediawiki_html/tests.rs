@@ -1,5 +1,83 @@
 use super::*;
 
+#[test]
+fn host_can_raise_source_limit_for_documents_and_fragments() {
+    let body = format!(
+        "<p>Readable article.</p><!--{}-->",
+        "x".repeat(2 * 1024 * 1024)
+    );
+    for input in [MediaWikiInput::Document, MediaWikiInput::BodyFragment] {
+        let source = if input == MediaWikiInput::Document {
+            article(&body)
+        } else {
+            body.clone()
+        };
+        let mut options = MediaWikiOptions {
+            input,
+            expected_version: Some(MediaWikiHtmlVersion::V2_8_0),
+            ..options()
+        };
+        assert!(matches!(
+            import(&source, options.clone()),
+            Err(MediaWikiImportError::TooComplex)
+        ));
+        options.limits.max_source_bytes = source.len();
+        assert!(import(&source, options).is_ok());
+    }
+}
+
+#[test]
+fn host_can_tighten_each_construction_budget() {
+    let source = article("<p title='text'>Readable article.</p>");
+    let defaults = HtmlLimits::default();
+    let limits = [
+        HtmlLimits {
+            max_source_bytes: 0,
+            ..defaults
+        },
+        HtmlLimits {
+            max_nodes: 0,
+            ..defaults
+        },
+        HtmlLimits {
+            max_depth: 0,
+            ..defaults
+        },
+        HtmlLimits {
+            max_attributes: 0,
+            ..defaults
+        },
+        HtmlLimits {
+            max_dom_bytes: 0,
+            ..defaults
+        },
+        HtmlLimits {
+            max_operations: 0,
+            ..defaults
+        },
+        HtmlLimits {
+            max_tree_bytes: 0,
+            ..defaults
+        },
+    ];
+    assert!(import(&source, options()).is_ok());
+    for limits in limits {
+        assert!(
+            matches!(
+                import(
+                    &source,
+                    MediaWikiOptions {
+                        limits,
+                        ..options()
+                    }
+                ),
+                Err(MediaWikiImportError::TooComplex)
+            ),
+            "{limits:?}"
+        );
+    }
+}
+
 fn options() -> MediaWikiOptions {
     MediaWikiOptions {
         source_url: Some("https://example.test/wiki/Article".into()),

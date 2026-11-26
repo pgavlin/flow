@@ -83,6 +83,7 @@ fn epub_profile_accepts_external_xhtml_doctypes_without_entity_definitions() {
         source,
         XhtmlParseOptions {
             allow_doctype: true,
+            ..Default::default()
         },
         &EpubXhtmlProfile,
     )
@@ -93,6 +94,7 @@ fn epub_profile_accepts_external_xhtml_doctypes_without_entity_definitions() {
             b"<!DOCTYPE html [<!ENTITY word 'text'>]><html/>",
             XhtmlParseOptions {
                 allow_doctype: true,
+                ..Default::default()
             }
         ),
         Err(XhtmlParseError::Malformed { .. })

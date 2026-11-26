@@ -7,8 +7,7 @@ use url::Url;
 
 use super::visibility::is_explicitly_hidden;
 use super::{
-    MAX_NODES, MAX_SOURCE, SOURCE_NODE_ATTRIBUTE, WebImportError, check_dom, local_fragment,
-    resolve,
+    HtmlLimits, SOURCE_NODE_ATTRIBUTE, WebImportError, check_dom, local_fragment, resolve,
 };
 use crate::model::flow::{Diagnostic, DiagnosticKind, DiagnosticSeverity};
 
@@ -36,6 +35,7 @@ fn serialize_mathml(node: NodeRef<'_>) -> String {
 pub(super) fn normalize_flow_containment(
     root: NodeRef<'_>,
     math_only: bool,
+    limits: HtmlLimits,
 ) -> Result<(), WebImportError> {
     let selector = if math_only {
         "[data-tex],[data-import-mathml]"
@@ -88,7 +88,7 @@ pub(super) fn normalize_flow_containment(
             {
                 break;
             }
-            if root.tree.len() >= MAX_NODES {
+            if root.tree.len() >= limits.max_nodes {
                 return Err(WebImportError::TooComplex);
             }
             let after = root.tree.new_element(&name);
@@ -116,6 +116,7 @@ pub(super) fn repair_before_extraction(
     document: &Document,
     base: Option<&Url>,
     source_url: Option<&Url>,
+    limits: HtmlLimits,
 ) -> Result<(), WebImportError> {
     // In preformatted content a break is literal whitespace, not a paragraph
     // hint. Convert it before extraction's global break-cleanup heuristics can
@@ -184,7 +185,7 @@ pub(super) fn repair_before_extraction(
         math_bytes = math_bytes
             .checked_add(math_source.len())
             .ok_or(WebImportError::TooComplex)?;
-        if math_bytes > MAX_SOURCE {
+        if math_bytes > limits.max_source_bytes {
             return Err(WebImportError::TooComplex);
         }
         // An inaccessible math source and an aria-hidden image can be two
@@ -272,7 +273,7 @@ pub(super) fn repair_before_extraction(
         }
         related.replace_with(&replacement);
     }
-    normalize_flow_containment(document.root(), true)?;
+    normalize_flow_containment(document.root(), true, limits)?;
     // Resolve links before extraction: Readability intentionally leaves bare
     // fragments alone, but HTML base URLs apply to them too.
     for link in document.select("a").nodes() {
@@ -355,10 +356,10 @@ pub(super) fn repair_before_extraction(
             picture.remove_from_parent();
         }
     }
-    if document.tree.len() > MAX_NODES {
+    if document.tree.len() > limits.max_nodes {
         return Err(WebImportError::TooComplex);
     }
-    check_dom(document.root())
+    check_dom(document.root(), limits)
 }
 
 /// Recover HTML structures that cannot satisfy the IR's specialized grammars.

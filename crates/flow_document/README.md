@@ -17,6 +17,23 @@ assert!(imported.document.text().as_str().contains("Hello"));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+## Import budgets
+
+Hosts can override construction budgets through:
+
+- `MarkdownOptions.limits` (`MarkdownLimits`): AST nodes and depth, checked after parsing.
+- `XhtmlParseOptions.limits`, `XhtmlOptions.limits`, and `EpubXhtmlOptions.limits`
+  (`XhtmlLimits`): source bytes, nodes, depth, and attributes per element.
+- `WebOptions.limits` and `MediaWikiOptions.limits` (`HtmlLimits`): source bytes,
+  nodes, depth, attributes, accounted DOM storage, parser work, and source-tree payload.
+  Web note snapshots and serialized math each also use `max_source_bytes`.
+- HTML/XHTML adapter `max_table_columns`: table width and column-span normalization;
+  `None` preserves 4,096, and zero is treated as one.
+
+Defaults retain the existing budgets. These are accounting checks, not process-wide
+memory limits or interruptible execution quotas. Representation limits and separate
+IR-builder limits (such as table rows, cells, and placement work) still apply.
+
 ## Features
 
 Default features are empty.

@@ -22,7 +22,6 @@ use crate::model::flow::{
 use thiserror::Error;
 
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
-const MAX_TABLE_COLUMNS: u32 = 4_096;
 
 /// Hooks selected explicitly by each format adapter, never public import API.
 pub(in crate::formats) trait LoweringPolicy {
@@ -143,6 +142,7 @@ pub(in crate::formats) enum LoweringError {
 }
 
 struct Lowerer<'a> {
+    max_table_columns: u32,
     tree: &'a SourceTree,
     builder: FlowBuilder,
     source_id: SourceArtifactId,
@@ -171,6 +171,7 @@ struct InlineWhitespace {
 }
 
 pub(in crate::formats) struct LoweringOptions {
+    pub max_table_columns: Option<u32>,
     pub resource_base: Option<String>,
     pub identity: Option<DocumentReference>,
     pub retention: SourceRetention,
@@ -186,6 +187,7 @@ pub(in crate::formats) fn lower_tree(
     policy: &dyn LoweringPolicy,
 ) -> Result<ImportOutcome, LoweringError> {
     let mut builder = FlowBuilder::new();
+    builder.set_max_table_columns(options.max_table_columns.unwrap_or(4_096).max(1));
     builder.set_resource_base(options.resource_base);
     let source_id = builder.add_source(
         source.to_owned(),
@@ -194,6 +196,7 @@ pub(in crate::formats) fn lower_tree(
     )?;
     let node_count = tree.nodes().len();
     let mut lowerer = Lowerer {
+        max_table_columns: options.max_table_columns.unwrap_or(4_096),
         tree: &tree,
         builder,
         source_id,
@@ -780,7 +783,8 @@ impl Lowerer<'_> {
                 let row = self.node(NodeKind::Row, row_source, None)?;
                 for cell_source in cells {
                     let is_header = self.element_name(cell_source) == Some("th");
-                    let column_span = self.table_span(cell_source, "colspan", MAX_TABLE_COLUMNS)?;
+                    let column_span =
+                        self.table_span(cell_source, "colspan", self.max_table_columns)?;
                     let remaining_rows = u32::try_from(row_count - row_index).unwrap_or(u32::MAX);
                     let row_span = self.table_span(cell_source, "rowspan", remaining_rows)?;
                     let metadata = Cell {
@@ -1848,6 +1852,7 @@ mod tests {
             tree,
             &styles,
             LoweringOptions {
+                max_table_columns: None,
                 resource_base: None,
                 identity: None,
                 retention: SourceRetention::Discard,

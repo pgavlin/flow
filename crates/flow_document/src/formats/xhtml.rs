@@ -17,7 +17,25 @@ const MAX_SOURCE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_DEPTH: usize = 4_096;
 const MAX_ATTRIBUTES_PER_ELEMENT: usize = 4_096;
 
-// Keep the public XML syntax API source-compatible while sharing its tree.
+/// Host-selected XML budgets. Zero is a literal limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XhtmlLimits {
+    pub max_source_bytes: usize,
+    pub max_nodes: usize,
+    pub max_depth: usize,
+    pub max_attributes: usize,
+}
+impl Default for XhtmlLimits {
+    fn default() -> Self {
+        Self {
+            max_source_bytes: MAX_SOURCE_BYTES,
+            max_nodes: 1_000_000,
+            max_depth: MAX_DEPTH,
+            max_attributes: MAX_ATTRIBUTES_PER_ELEMENT,
+        }
+    }
+}
+// Shared source tree.
 pub use super::html::tree::{
     Attribute as XhtmlAttribute, Element as XhtmlElement, ExpandedName,
     SourceNode as XhtmlSourceNode, SourceNodeId, SourceNodeKind as XhtmlSourceNodeKind,
@@ -27,6 +45,7 @@ use super::html::tree::{TreeError, TreeLimits};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct XhtmlParseOptions {
+    pub limits: XhtmlLimits,
     /// Accept a document type declaration syntactically, but never load its
     /// external subset or use it to define entities.
     pub allow_doctype: bool,
@@ -120,7 +139,7 @@ pub fn parse_with_options(
     source: &[u8],
     options: XhtmlParseOptions,
 ) -> Result<XhtmlSourceTree, XhtmlParseError> {
-    if source.len() > MAX_SOURCE_BYTES {
+    if source.len() > options.limits.max_source_bytes {
         return Err(XhtmlParseError::TooComplex);
     }
 
@@ -129,9 +148,15 @@ pub fn parse_with_options(
     reader.config_mut().check_end_names = true;
     reader.config_mut().trim_text(false);
 
-    // Preserve the XML parser's existing limits exactly; it enforces depth,
-    // attribute count, and input bytes itself. HTML adapters use bounded builders.
-    let mut tree = XhtmlSourceTree::new(Some(0..source.len()), TreeLimits::xml())?;
+    // XML enforces lexical depth, attributes, and input bytes directly;
+    // the shared builder enforces the host's node budget.
+    let mut tree = XhtmlSourceTree::new(
+        Some(0..source.len()),
+        TreeLimits {
+            max_nodes: options.limits.max_nodes,
+            ..TreeLimits::xml()
+        },
+    )?;
     let root = tree.root();
     let mut stack = vec![root];
     let mut buffer = Vec::new();
@@ -146,16 +171,29 @@ pub fn parse_with_options(
 
         match event {
             Event::Start(start) => {
-                if stack.len() > MAX_DEPTH {
+                if stack.len() > options.limits.max_depth {
                     return Err(XhtmlParseError::TooComplex);
                 }
-                let element = decode_element(&reader, &start, event_range.clone())?;
+                let element = decode_element(
+                    &reader,
+                    &start,
+                    event_range.clone(),
+                    options.limits.max_attributes,
+                )?;
                 let parent = *stack.last().expect("synthetic root remains on stack");
                 let node = tree.push(parent, XhtmlSourceNodeKind::Element(element), event_range)?;
                 stack.push(node);
             }
             Event::Empty(start) => {
-                let element = decode_element(&reader, &start, event_range.clone())?;
+                if stack.len() > options.limits.max_depth {
+                    return Err(XhtmlParseError::TooComplex);
+                }
+                let element = decode_element(
+                    &reader,
+                    &start,
+                    event_range.clone(),
+                    options.limits.max_attributes,
+                )?;
                 let parent = *stack.last().expect("synthetic root remains on stack");
                 tree.push(parent, XhtmlSourceNodeKind::Element(element), event_range)?;
             }
@@ -283,13 +321,14 @@ fn decode_element(
     reader: &NsReader<&[u8]>,
     start: &BytesStart<'_>,
     source_range: Range<usize>,
+    max_attributes: usize,
 ) -> Result<XhtmlElement, XhtmlParseError> {
     let (namespace, _) = reader.resolver().resolve_element(start.name());
     let name = decode_name(reader, start.name(), namespace, source_range.start)?;
     let mut attributes = Vec::new();
     let mut expanded_attributes = HashSet::new();
     for attribute in start.attributes().with_checks(true) {
-        if attributes.len() >= MAX_ATTRIBUTES_PER_ELEMENT {
+        if attributes.len() >= max_attributes {
             return Err(XhtmlParseError::TooComplex);
         }
         let attribute = attribute.map_err(|error| malformed(source_range.start, error))?;

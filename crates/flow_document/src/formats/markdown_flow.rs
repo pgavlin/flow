@@ -11,6 +11,7 @@ use crate::model::flow::*;
 
 #[derive(Clone, Debug, Default)]
 pub struct MarkdownOptions {
+    pub limits: MarkdownLimits,
     pub resource_base: Option<String>,
     pub identity: Option<DocumentReference>,
     pub retention: SourceRetention,
@@ -60,7 +61,7 @@ pub fn parse(source: &str, options: MarkdownOptions) -> Result<ImportOutcome, Ma
     parse_options.constructs.math_flow = true;
     parse_options.constructs.math_text = true;
     let root = markdown::to_mdast(source, &parse_options).map_err(MarkdownError::Markdown)?;
-    validate_complexity(&root)?;
+    validate_complexity(&root, options.limits)?;
 
     let mut builder = FlowBuilder::new();
     builder.set_resource_base(options.resource_base);
@@ -991,12 +992,27 @@ impl Importer<'_> {
 const MAX_MARKDOWN_NODES: usize = 1_000_000;
 const MAX_MARKDOWN_DEPTH: usize = 256;
 
-fn validate_complexity(root: &MdNode) -> Result<(), MarkdownError> {
+/// Post-parse AST budgets, not quotas for the underlying Markdown parser.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MarkdownLimits {
+    pub max_nodes: usize,
+    pub max_depth: usize,
+}
+impl Default for MarkdownLimits {
+    fn default() -> Self {
+        Self {
+            max_nodes: MAX_MARKDOWN_NODES,
+            max_depth: MAX_MARKDOWN_DEPTH,
+        }
+    }
+}
+
+fn validate_complexity(root: &MdNode, limits: MarkdownLimits) -> Result<(), MarkdownError> {
     let mut visited = 0usize;
     let mut stack = vec![(root, 0usize)];
     while let Some((node, depth)) = stack.pop() {
         visited = visited.checked_add(1).ok_or(MarkdownError::TooComplex)?;
-        if visited > MAX_MARKDOWN_NODES || depth > MAX_MARKDOWN_DEPTH {
+        if visited > limits.max_nodes || depth > limits.max_depth {
             return Err(MarkdownError::TooComplex);
         }
         if let Some(children) = node.children() {
@@ -1349,6 +1365,7 @@ mod tests {
         let outcome = super::parse(
             source,
             MarkdownOptions {
+                limits: Default::default(),
                 resource_base: Some("book/".into()),
                 identity: Some(DocumentReference::Relative("chapter.md".into())),
                 retention: SourceRetention::Retain,

@@ -27,11 +27,10 @@ use visibility::is_explicitly_hidden;
 
 use super::html::{
     lowering::{self, LoweringOptions, LoweringPolicy},
-    parser::{self, HTML_NS, MAX_DEPTH, MAX_NODES, MAX_SOURCE},
+    parser::{self, HTML_NS},
     source::SourceSyntax,
     tree::{
         Attribute, Element, ExpandedName, NodeProvenance, SourceNodeKind, SourceTree, TreeError,
-        TreeLimits,
     },
 };
 use crate::model::flow::{
@@ -42,10 +41,18 @@ use crate::model::flow::{
     SemanticRole, SourceNodeIdentity, SourceRetention,
 };
 
+#[cfg(test)]
+use super::html::parser::{MAX_DEPTH, MAX_SOURCE};
+
 const SOURCE_NODE_ATTRIBUTE: &str = "data-import-source-node";
+
+pub use super::html::parser::HtmlLimits;
 
 #[derive(Clone, Debug, Default)]
 pub struct WebOptions {
+    /// Maximum table width and normalized column span: None uses 4,096; zero is treated as one.
+    pub max_table_columns: Option<u32>,
+    pub limits: HtmlLimits,
     /// Final response URL after redirects, supplied by the host.
     pub source_url: Option<String>,
     pub identity: Option<DocumentReference>,
@@ -323,7 +330,8 @@ impl LoweringPolicy for WebPolicy {
 /// Extract an article from supplied UTF-8 HTML and lower directly into flow IR.
 /// Failure to find an article is reported, not silently replaced by the whole page.
 pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, WebImportError> {
-    if source.len() > MAX_SOURCE {
+    let limits = options.limits;
+    if source.len() > limits.max_source_bytes {
         return Err(WebImportError::TooComplex);
     }
     let source_url = options
@@ -336,7 +344,8 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
                 .ok_or(WebImportError::InvalidUrl)
         })
         .transpose()?;
-    let document = parse_bounded(source)?;
+    let document =
+        parser::parse_with_limits(source, false, limits).map_err(|_| WebImportError::TooComplex)?;
     // Stable original-element associations survive extraction's cloned DOMs and
     // repair carriers. Never trust a source-supplied value for this private key.
     for (index, node) in document.select("*").nodes().iter().enumerate() {
@@ -359,8 +368,8 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
         }
     }
     let mut responsive = responsive::ResponsiveImages::capture(&document, base.as_ref());
-    repair_before_extraction(&document, base.as_ref(), source_url.as_ref())?;
-    let notes = capture_referenced_notes(&document, source_url.as_ref(), base.as_ref())?;
+    repair_before_extraction(&document, base.as_ref(), source_url.as_ref(), limits)?;
+    let notes = capture_referenced_notes(&document, source_url.as_ref(), base.as_ref(), limits)?;
     let declared_modified = meta_content(&document, &["article:modified_time", "dcterms.modified"]);
     let declared_url = document
         .select("link[rel][href]")
@@ -378,7 +387,7 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
         document,
         source_url.as_ref().map(Url::as_str),
         Some(Config {
-            max_elements_to_parse: MAX_NODES,
+            max_elements_to_parse: limits.max_nodes,
             keep_classes: true,
             ..Default::default()
         }),
@@ -421,24 +430,22 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
             }
         }
     }
-    restore_referenced_notes(&extracted, notes, source_url.as_ref(), base.as_ref())?;
-    normalize_flow_containment(extracted.root(), false)?;
+    restore_referenced_notes(
+        &extracted,
+        notes,
+        source_url.as_ref(),
+        base.as_ref(),
+        limits,
+    )?;
+    normalize_flow_containment(extracted.root(), false, limits)?;
     let mut normalization_diagnostics = normalize_sequences(&extracted);
     normalize_article(&extracted, &metadata.title);
     for image in extracted.selection().select("img").nodes() {
         responsive.recover(*image, base.as_ref());
     }
     normalization_diagnostics.append(&mut responsive.diagnostics);
-    check_dom(extracted.root())?;
-    let mut tree = SourceTree::new(
-        None,
-        TreeLimits {
-            max_nodes: MAX_NODES,
-            max_depth: MAX_DEPTH + 1,
-            ..Default::default()
-        },
-    )
-    .map_err(tree_error)?;
+    check_dom(extracted.root(), limits)?;
+    let mut tree = SourceTree::new(None, limits.tree_limits(1)).map_err(tree_error)?;
     let root = tree.root();
     // Carry page language/direction without pretending its wrapper has byte offsets.
     let mut attributes = Vec::new();
@@ -612,6 +619,7 @@ pub fn import(source: &str, options: WebOptions) -> Result<WebImportOutcome, Web
         tree,
         &styles,
         LoweringOptions {
+            max_table_columns: options.max_table_columns,
             identity: options.identity,
             resource_base: base.map(String::from),
             retention: options.retention,
@@ -699,12 +707,9 @@ fn resolve(reference: &str, base: Option<&Url>) -> Option<Url> {
         .ok()
 }
 
-fn check_dom(root: NodeRef<'_>) -> Result<(), WebImportError> {
-    parser::check_dom_with_work(root, &mut 0).map_err(|_| WebImportError::TooComplex)
-}
-
-fn parse_bounded(source: &str) -> Result<Document, WebImportError> {
-    parser::parse_bounded(source).map_err(|_| WebImportError::TooComplex)
+fn check_dom(root: NodeRef<'_>, limits: HtmlLimits) -> Result<(), WebImportError> {
+    parser::check_dom_with_limits(root, &mut 0, limits.into())
+        .map_err(|_| WebImportError::TooComplex)
 }
 
 fn local_fragment(reference: &str, source_url: Option<&Url>) -> Option<String> {

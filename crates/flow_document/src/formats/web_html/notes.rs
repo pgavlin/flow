@@ -7,9 +7,7 @@ use dom_smoothie::dom_query::{Attr, Document, NodeData, NodeId, Selection};
 use url::Url;
 
 use super::visibility::is_explicitly_hidden;
-use super::{
-    HTML_NS, MAX_DEPTH, MAX_NODES, MAX_SOURCE, WebImportError, check_dom, local_fragment, resolve,
-};
+use super::{HTML_NS, HtmlLimits, WebImportError, check_dom, local_fragment, resolve};
 
 const NOTE_REFERENCES: &str = "a[role~='doc-noteref'], a[rel~='footnote']";
 
@@ -85,6 +83,7 @@ pub(super) fn capture_referenced_notes(
     document: &Document,
     source_url: Option<&Url>,
     base: Option<&Url>,
+    limits: HtmlLimits,
 ) -> Result<HashMap<String, RetainedNote>, WebImportError> {
     let targets: HashSet<_> = note_targets(&Selection::from(document.root()), source_url, base)
         .into_iter()
@@ -144,7 +143,7 @@ pub(super) fn capture_referenced_notes(
                 continue;
             };
             bytes = bytes.checked_add(size).ok_or(WebImportError::TooComplex)?;
-            if bytes > MAX_SOURCE {
+            if bytes > limits.max_source_bytes {
                 return Err(WebImportError::TooComplex);
             }
             let data = node.query(|inner| inner.data.clone()).unwrap();
@@ -168,11 +167,12 @@ pub(super) fn restore_referenced_notes(
     mut notes: HashMap<String, RetainedNote>,
     source_url: Option<&Url>,
     base: Option<&Url>,
+    limits: HtmlLimits,
 ) -> Result<(), WebImportError> {
-    if extracted.document.tree.len() > MAX_NODES {
+    if extracted.document.tree.len() > limits.max_nodes {
         return Err(WebImportError::TooComplex);
     }
-    check_dom(extracted.root())?;
+    check_dom(extracted.root(), limits)?;
     let mut present: HashSet<_> = extracted
         .selection()
         .select("[id]")
@@ -194,8 +194,8 @@ pub(super) fn restore_referenced_notes(
             .len()
             .saturating_add(note.nodes.len())
             .saturating_add(1)
-            > MAX_NODES
-            || note.depth.saturating_add(2) > MAX_DEPTH
+            > limits.max_nodes
+            || note.depth.saturating_add(2) > limits.max_depth
         {
             return Err(WebImportError::TooComplex);
         }
@@ -220,7 +220,7 @@ pub(super) fn restore_referenced_notes(
         pending.extend(note_targets(&selection, source_url, base));
         extracted.root().append_child(&wrapper);
     }
-    check_dom(extracted.root())
+    check_dom(extracted.root(), limits)
 }
 
 #[cfg(test)]
@@ -232,9 +232,9 @@ mod tests {
         let original = Document::from(
             "<p><a role='doc-noteref' href='#note'>1</a></p><aside id='note'><p>Evidence</p></aside>",
         );
-        let notes = capture_referenced_notes(&original, None, None).unwrap();
+        let notes = capture_referenced_notes(&original, None, None, HtmlLimits::default()).unwrap();
         let document = Document::from("<p><a role='doc-noteref' href='#note'>1</a></p>");
-        while document.tree.len() < MAX_NODES - 1 {
+        while document.tree.len() < HtmlLimits::default().max_nodes - 1 {
             document.tree.new_element("span");
         }
         let root = document.root().id;
@@ -245,7 +245,7 @@ mod tests {
         };
         let before = extracted.document.tree.len();
         assert!(matches!(
-            restore_referenced_notes(&extracted, notes, None, None),
+            restore_referenced_notes(&extracted, notes, None, None, HtmlLimits::default()),
             Err(WebImportError::TooComplex)
         ));
         assert_eq!(extracted.document.tree.len(), before);

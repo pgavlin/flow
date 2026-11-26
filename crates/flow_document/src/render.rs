@@ -3010,6 +3010,7 @@ mod tests {
         parse(
             source,
             MarkdownOptions {
+                limits: Default::default(),
                 resource_base: resource_base.map(str::to_owned),
                 identity: None,
                 retention: SourceRetention::Discard,
